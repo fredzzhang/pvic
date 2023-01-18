@@ -4,3 +4,6 @@
 [submodule "vcoco"]
 	path = vcoco
 	url = https://github.com/fredzzhang/vcoco.git
+[submodule "pocket"]
+	path = pocket
+	url = https://github.com/fredzzhang/pocket.git

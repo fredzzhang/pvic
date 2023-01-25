@@ -77,6 +77,8 @@ def main(args):
 
     if args.map:
         eval_zs_recognition(dataloader, model, text_features, device)
+    if args.rec:
+        eval_zs_recall(dataloader, model, text_features, device)
 
 def eval_zs_recognition(dataloader, model, class_embeddings, device):
     """Evaluate the zero-shot interaction recognition mAP"""
@@ -96,6 +98,50 @@ def eval_zs_recognition(dataloader, model, class_embeddings, device):
         f" none-rare: {ap[dataloader.dataset.non_rare].mean():.4f}"
     )
 
+def eval_zs_recall(dataloader, model, class_embeddings, device):
+    """Evaluate the recall from top k interactions with varying k"""
+    rec = torch.zeros(6, 600)
+    full = torch.zeros(1, 600)
+    for images, targets in tqdm(dataloader):
+        # image_features = model.encode_image(images.to(device))
+        image_features = clip_forward(model, images.to(device))
+        image_features /= image_features.norm(dim=1, keepdim=True)
+
+        cos = image_features @ class_embeddings.t()
+        rank = cos.argsort(dim=1, descending=True).cpu()
+        i, j = torch.nonzero(targets).unbind(1)
+        # Duplicate the rank once for each ground truth instance
+        ref = rank[i]
+        isin = torch.eq(ref[:, :50], j.unsqueeze(1))
+        isin3 = isin[:, :3].sum(1)
+        isin5 = isin[:, :5].sum(1)
+        isin10 = isin[:, :10].sum(1)
+        isin15 = isin[:, :20].sum(1)
+        isin25 = isin[:, :25].sum(1)
+        isin50 = isin.sum(1)
+        isin_ = torch.stack([isin3, isin5, isin10, isin15, isin25, isin50], dim=0)
+        # Aggregate results for each ground truth instance
+        for n, t in enumerate(j):
+            rec[:, t] += isin_[:, n]
+            full[0, t] += 1
+
+    rec /= full
+    print(
+        f"Recall for top-k interactions:\n"
+        f"k=3,\tfull: {rec[0].mean():.4f}, rare: {rec[0, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[0, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"k=5,\tfull: {rec[1].mean():.4f}, rare: {rec[1, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[1, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"k=10,\tfull: {rec[2].mean():.4f}, rare: {rec[2, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[2, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"k=15,\tfull: {rec[3].mean():.4f}, rare: {rec[3, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[3, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"k=25,\tfull: {rec[4].mean():.4f}, rare: {rec[4, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[4, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"k=50,\tfull: {rec[5].mean():.4f}, rare: {rec[5, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[5, dataloader.dataset.non_rare].mean():.4f}.\n"
+    )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", "-dr", type=str, default="hicodet")
@@ -103,5 +149,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", "-bs", type=int, default=128)
     parser.add_argument("--num-workers", "-nw", type=int, default=8)
     parser.add_argument("--map", action="store_true", default=False)
+    parser.add_argument("--rec", action="store_true", default=False)
     args = parser.parse_args()
     main(args)

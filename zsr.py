@@ -102,6 +102,8 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
     """Evaluate the recall from top k interactions with varying k"""
     rec = torch.zeros(6, 600)
     full = torch.zeros(1, 600)
+    nuniqobj = torch.zeros(6, 2)
+    intr2obj = torch.as_tensor(dataloader.dataset.class_corr)[:, 1]
     for images, targets in tqdm(dataloader):
         # image_features = model.encode_image(images.to(device))
         image_features = clip_forward(model, images.to(device))
@@ -110,6 +112,17 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
         cos = image_features @ class_embeddings.t()
         rank = cos.argsort(dim=1, descending=True).cpu()
         i, j = torch.nonzero(targets).unbind(1)
+        # Record the number of unique object types from the top-k triplets
+        selection = rank[:, :50]
+        obj_list = intr2obj[selection].unbind(0)
+        for objs in obj_list:
+            nuniqobj[0, 0] += objs[:3].unique().numel()
+            nuniqobj[1, 0] += objs[:5].unique().numel()
+            nuniqobj[2, 0] += objs[:10].unique().numel()
+            nuniqobj[3, 0] += objs[:15].unique().numel()
+            nuniqobj[4, 0] += objs[:25].unique().numel()
+            nuniqobj[5, 0] += objs.unique().numel()
+        nuniqobj[:, 1] += len(obj_list)
         # Duplicate the rank once for each ground truth instance
         ref = rank[i]
         isin = torch.eq(ref[:, :50], j.unsqueeze(1))
@@ -125,21 +138,22 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
             rec[:, t] += isin_[:, n]
             full[0, t] += 1
 
+    nuniqobj = nuniqobj[:, 0] / nuniqobj[:, 1]
     rec /= full
     print(
         f"Recall for top-k interactions:\n"
         f"k=3,\tfull: {rec[0].mean():.4f}, rare: {rec[0, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[0, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[0, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[0]:.2f}.\n"
         f"k=5,\tfull: {rec[1].mean():.4f}, rare: {rec[1, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[1, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[1, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[1]:.2f}.\n"
         f"k=10,\tfull: {rec[2].mean():.4f}, rare: {rec[2, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[2, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[2, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[2]:.2f}.\n"
         f"k=15,\tfull: {rec[3].mean():.4f}, rare: {rec[3, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[3, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[3, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[3]:.2f}.\n"
         f"k=25,\tfull: {rec[4].mean():.4f}, rare: {rec[4, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[4, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[4, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[4]:.2f}.\n"
         f"k=50,\tfull: {rec[5].mean():.4f}, rare: {rec[5, dataloader.dataset.rare].mean():.4f}, "
-        f"non-rare: {rec[5, dataloader.dataset.non_rare].mean():.4f}.\n"
+        f"non-rare: {rec[5, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[5]:.2f}.\n"
     )
 
 if __name__ == "__main__":

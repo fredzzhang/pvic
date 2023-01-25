@@ -9,19 +9,13 @@ Microsoft Research Asia
 """
 import os
 import clip
+import json
 import torch
 import pocket
 import argparse
 
 from tqdm import tqdm
 from hicodet.hicodet import HICODet
-
-def construct_prompt(s):
-    v, o = s.split()
-    if v == "no_interaction":
-        return f"a photo of a person and a {o}"
-    else:
-        return f"a photo of a person {v} a {o}"
 
 @torch.no_grad()
 def main(args):
@@ -44,7 +38,9 @@ def main(args):
         
     )
 
-    text = clip.tokenize([construct_prompt(p) for p in dataset.interactions]).to(device)
+    with open("hicodet/prompts.json", "r") as f:
+        prompts = json.load(f)
+    text = clip.tokenize(prompts).to(device)
     text_features = model.encode_text(text)
     text_features /= text_features.norm(dim=1, keepdim=True)
 
@@ -56,7 +52,12 @@ def main(args):
         cos = image_features @ text_features.t()
         ap.append(cos, targets)
 
-    print(ap.eval().mean())
+    ap = ap.eval()
+    print(
+        f"The mAP is {ap.mean():.4f},"
+        f" rare: {ap[dataset.rare].mean():.4f},"
+        f" none-rare: {ap[dataset.non_rare].mean():.4f}"
+    )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

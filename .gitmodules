@@ -7,3 +7,6 @@
 [submodule "pocket"]
 	path = pocket
 	url = https://github.com/fredzzhang/pocket.git
+[submodule "detr"]
+	path = detr
+	url = https://github.com/fredzzhang/detr.git

@@ -145,9 +145,12 @@ class CustomisedDLE(DistributedLearningEngine):
         self._state.optimizer.step()
 
     @torch.no_grad()
-    def test_hico(self, dataloader):
+    def test_hico(self, dataloader, rank=None):
         net = self._state.net
         net.eval()
+
+        if rank is None:
+            rank = torch.distributed.get_rank()
 
         dataset = dataloader.dataset.dataset
         associate = BoxPairAssociation(min_iou=0.5)
@@ -155,16 +158,18 @@ class CustomisedDLE(DistributedLearningEngine):
             dataset.object_n_verb_to_interaction, dtype=float
         ))
 
-        meter = DetectionAPMeter(
-            600, nproc=1,
-            num_gt=dataset.anno_interaction,
-            algorithm='11P'
-        )
+        if rank == 0:
+            meter = DetectionAPMeter(
+                600, nproc=1, algorithm='11P',
+                num_gt=dataset.anno_interaction,
+            )
         for batch in tqdm(dataloader):
             inputs = pocket.ops.relocate_to_cuda(batch[0])
             outputs = net(inputs)
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
             targets = batch[-1]
+
+            scores_clt = []; preds_clt = []; labels_clt = []
             for output, target in zip(outputs, targets):
                 # Format detections
                 boxes = output['boxes']
@@ -192,9 +197,26 @@ class CustomisedDLE(DistributedLearningEngine):
                             scores[det_idx].view(-1)
                         )
 
-                meter.append(scores, interactions, labels)
+                scores_clt.append(scores)
+                preds_clt.append(interactions)
+                labels_clt.append(labels)
+            # Collate results into one tensor
+            scores_clt = torch.cat(scores_clt)
+            preds_clt = torch.cat(preds_clt)
+            labels_clt = torch.cat(labels_clt)
+            # Gather data from all processes
+            scores_ddp = pocket.utils.all_gather(scores_clt)
+            preds_ddp = pocket.utils.all_gather(preds_clt)
+            labels_ddp = pocket.utils.all_gather(labels_clt)
 
-        return meter.eval()
+            if rank == 0:
+                meter.append(torch.cat(scores_ddp), torch.cat(preds_ddp), torch.cat(labels_ddp))
+
+        if rank == 0:
+            ap = meter.eval()
+            return ap
+        else:
+            return -1
 
     @torch.no_grad()
     def cache_hico(self, dataloader, cache_dir='matlab'):

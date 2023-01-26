@@ -99,16 +99,17 @@ def main(rank, args):
     if args.eval:
         if args.dataset == 'vcoco':
             raise NotImplementedError(f"Evaluation on V-COCO has not been implemented.")
-        ap = engine.test_hico(test_loader)
-        # Fetch indices for rare and non-rare classes
-        num_anno = torch.as_tensor(trainset.dataset.anno_interaction)
-        rare = torch.nonzero(num_anno < 10).squeeze(1)
-        non_rare = torch.nonzero(num_anno >= 10).squeeze(1)
-        print(
-            f"The mAP is {ap.mean():.4f},"
-            f" rare: {ap[rare].mean():.4f},"
-            f" none-rare: {ap[non_rare].mean():.4f}"
-        )
+        ap = engine.test_hico(test_loader, rank=rank)
+        if rank == 0:
+            # Fetch indices for rare and non-rare classes
+            num_anno = torch.as_tensor(trainset.dataset.anno_interaction)
+            rare = torch.nonzero(num_anno < 10).squeeze(1)
+            non_rare = torch.nonzero(num_anno >= 10).squeeze(1)
+            print(
+                f"The mAP is {ap.mean():.4f},"
+                f" rare: {ap[rare].mean():.4f},"
+                f" none-rare: {ap[non_rare].mean():.4f}"
+            )
         return
 
     for p in upt.detector.parameters():
@@ -189,7 +190,7 @@ if __name__ == '__main__':
     parser.add_argument('--resume', default='', help='Resume from a model')
     parser.add_argument('--output-dir', default='checkpoints')
     parser.add_argument('--print-interval', default=500, type=int)
-    parser.add_argument('--world-size', default=1, type=int)
+    parser.add_argument('--world-size', default=8, type=int)
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--sanity', action='store_true')

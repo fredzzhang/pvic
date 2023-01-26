@@ -126,10 +126,11 @@ class CacheTemplate(defaultdict):
             return [0., 0., .1, .1, 0.]
 
 class CustomisedDLE(DistributedLearningEngine):
-    def __init__(self, net, dataloader, max_norm=0, num_classes=117, **kwargs):
-        super().__init__(net, None, dataloader, **kwargs)
+    def __init__(self, net, train_dataloader, test_dataloader, max_norm=0, num_classes=117, **kwargs):
+        super().__init__(net, None, train_dataloader, **kwargs)
         self.max_norm = max_norm
         self.num_classes = num_classes
+        self.test_dataloader = test_dataloader
 
     def _on_each_iteration(self):
         loss_dict = self._state.net(
@@ -144,13 +145,24 @@ class CustomisedDLE(DistributedLearningEngine):
             torch.nn.utils.clip_grad_norm_(self._state.net.parameters(), self.max_norm)
         self._state.optimizer.step()
 
-    @torch.no_grad()
-    def test_hico(self, dataloader, rank=None):
-        net = self._state.net
-        net.eval()
+    def _on_end_epoch(self):
+        super()._on_end_epoch()
+        ap = self.test_hico()
+        if self._rank == 0:
+            # Fetch indices for rare and non-rare classes
+            rare = self.test_dataloader.dataset.dataset.rare
+            non_rare = self.test_dataloader.dataset.dataset.non_rare
+            print(
+                f"Epoch {self._state.epoch} =>\t"
+                f"mAP: {ap.mean():.4f},"
+                f" rare: {ap[rare].mean():.4f},"
+                f" none-rare: {ap[non_rare].mean():.4f}"
+            )
 
-        if rank is None:
-            rank = torch.distributed.get_rank()
+    @torch.no_grad()
+    def test_hico(self):
+        dataloader = self.test_dataloader
+        net = self._state.net; net.eval()
 
         dataset = dataloader.dataset.dataset
         associate = BoxPairAssociation(min_iou=0.5)
@@ -158,7 +170,7 @@ class CustomisedDLE(DistributedLearningEngine):
             dataset.object_n_verb_to_interaction, dtype=float
         ))
 
-        if rank == 0:
+        if self._rank == 0:
             meter = DetectionAPMeter(
                 600, nproc=1, algorithm='11P',
                 num_gt=dataset.anno_interaction,
@@ -209,10 +221,10 @@ class CustomisedDLE(DistributedLearningEngine):
             preds_ddp = pocket.utils.all_gather(preds_clt)
             labels_ddp = pocket.utils.all_gather(labels_clt)
 
-            if rank == 0:
+            if self._rank == 0:
                 meter.append(torch.cat(scores_ddp), torch.cat(preds_ddp), torch.cat(labels_ddp))
 
-        if rank == 0:
+        if self._rank == 0:
             ap = meter.eval()
             return ap
         else:

@@ -81,7 +81,7 @@ def main(rank, args):
         print(f"=> Rank {rank}: start from a randomly initialised model")
 
     engine = CustomisedDLE(
-        upt, train_loader,
+        upt, train_loader, test_loader,
         max_norm=args.clip_max_norm,
         num_classes=args.num_classes,
         print_interval=args.print_interval,
@@ -99,12 +99,11 @@ def main(rank, args):
     if args.eval:
         if args.dataset == 'vcoco':
             raise NotImplementedError(f"Evaluation on V-COCO has not been implemented.")
-        ap = engine.test_hico(test_loader, rank=rank)
+        ap = engine.test_hico()
         if rank == 0:
             # Fetch indices for rare and non-rare classes
-            num_anno = torch.as_tensor(trainset.dataset.anno_interaction)
-            rare = torch.nonzero(num_anno < 10).squeeze(1)
-            non_rare = torch.nonzero(num_anno >= 10).squeeze(1)
+            rare = trainset.dataset.rare
+            non_rare = trainset.dataset.non_rare
             print(
                 f"The mAP is {ap.mean():.4f},"
                 f" rare: {ap[rare].mean():.4f},"

@@ -162,42 +162,37 @@ class CustomisedDLE(DistributedLearningEngine):
         )
         for batch in tqdm(dataloader):
             inputs = pocket.ops.relocate_to_cuda(batch[0])
-            output = net(inputs)
+            outputs = net(inputs)
+            outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
+            targets = batch[-1]
+            for output, target in zip(outputs, targets):
+                # Format detections
+                boxes = output['boxes']
+                boxes_h, boxes_o = boxes[output['pairing']].unbind(0)
+                objects = output['objects']
+                scores = output['scores']
+                verbs = output['labels']
+                interactions = conversion[objects, verbs]
+                # Recover target box scale
+                gt_bx_h = net.module.recover_boxes(target['boxes_h'], target['size'])
+                gt_bx_o = net.module.recover_boxes(target['boxes_o'], target['size'])
 
-            # Skip images without detections
-            if output is None or len(output) == 0:
-                continue
-            # Batch size is fixed as 1 for inference
-            assert len(output) == 1, f"Batch size is not 1 but {len(output)}."
-            output = pocket.ops.relocate_to_cpu(output[0], ignore=True)
-            target = batch[-1][0]
-            # Format detections
-            boxes = output['boxes']
-            boxes_h, boxes_o = boxes[output['pairing']].unbind(0)
-            objects = output['objects']
-            scores = output['scores']
-            verbs = output['labels']
-            interactions = conversion[objects, verbs]
-            # Recover target box scale
-            gt_bx_h = net.module.recover_boxes(target['boxes_h'], target['size'])
-            gt_bx_o = net.module.recover_boxes(target['boxes_o'], target['size'])
+                # Associate detected pairs with ground truth pairs
+                labels = torch.zeros_like(scores)
+                unique_hoi = interactions.unique()
+                for hoi_idx in unique_hoi:
+                    gt_idx = torch.nonzero(target['hoi'] == hoi_idx).squeeze(1)
+                    det_idx = torch.nonzero(interactions == hoi_idx).squeeze(1)
+                    if len(gt_idx):
+                        labels[det_idx] = associate(
+                            (gt_bx_h[gt_idx].view(-1, 4),
+                            gt_bx_o[gt_idx].view(-1, 4)),
+                            (boxes_h[det_idx].view(-1, 4),
+                            boxes_o[det_idx].view(-1, 4)),
+                            scores[det_idx].view(-1)
+                        )
 
-            # Associate detected pairs with ground truth pairs
-            labels = torch.zeros_like(scores)
-            unique_hoi = interactions.unique()
-            for hoi_idx in unique_hoi:
-                gt_idx = torch.nonzero(target['hoi'] == hoi_idx).squeeze(1)
-                det_idx = torch.nonzero(interactions == hoi_idx).squeeze(1)
-                if len(gt_idx):
-                    labels[det_idx] = associate(
-                        (gt_bx_h[gt_idx].view(-1, 4),
-                        gt_bx_o[gt_idx].view(-1, 4)),
-                        (boxes_h[det_idx].view(-1, 4),
-                        boxes_o[det_idx].view(-1, 4)),
-                        scores[det_idx].view(-1)
-                    )
-
-            meter.append(scores, interactions, labels)
+                meter.append(scores, interactions, labels)
 
         return meter.eval()
 

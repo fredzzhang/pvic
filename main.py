@@ -46,7 +46,7 @@ def main(rank, args):
 
     train_loader = DataLoader(
         dataset=trainset,
-        collate_fn=custom_collate, batch_size=args.batch_size,
+        collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
         num_workers=args.num_workers, pin_memory=True, drop_last=True,
         sampler=DistributedSampler(
             trainset, 
@@ -55,9 +55,12 @@ def main(rank, args):
     )
     test_loader = DataLoader(
         dataset=testset,
-        collate_fn=custom_collate, batch_size=1,
+        collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
         num_workers=args.num_workers, pin_memory=True, drop_last=False,
-        sampler=torch.utils.data.SequentialSampler(testset)
+        sampler=DistributedSampler(
+            testset,
+            num_replicas=args.world_size,
+            rank=rank)
     )
 
     args.human_idx = 0
@@ -140,7 +143,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr-head', default=1e-4, type=float)
-    parser.add_argument('--batch-size', default=2, type=int)
+    parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--weight-decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr-drop', default=10, type=int)

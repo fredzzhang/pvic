@@ -175,7 +175,7 @@ class CustomisedDLE(DistributedLearningEngine):
                 600, nproc=1, algorithm='11P',
                 num_gt=dataset.anno_interaction,
             )
-        for batch in tqdm(dataloader, disable=self._rank):
+        for batch in tqdm(dataloader, disable=(self._world_size != 1)):
             inputs = pocket.ops.relocate_to_cuda(batch[0])
             outputs = net(inputs)
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)

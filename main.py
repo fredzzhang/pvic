@@ -56,7 +56,7 @@ def main(rank, args):
     test_loader = DataLoader(
         dataset=testset,
         collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
-        num_workers=args.num_workers, pin_memory=True, drop_last=False,
+        num_workers=args.num_workers, pin_memory=True, drop_last=True,
         sampler=DistributedSampler(
             testset,
             num_replicas=args.world_size,
@@ -177,7 +177,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset', default='hicodet', type=str)
     parser.add_argument('--partitions', nargs='+', default=['train2015', 'test2015'], type=str)
-    parser.add_argument('--num-workers', default=2, type=int)
+    parser.add_argument('--num-workers', default=8, type=int)
     parser.add_argument('--data-root', default='./hicodet')
 
     # training parameters

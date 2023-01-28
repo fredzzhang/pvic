@@ -177,7 +177,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset', default='hicodet', type=str)
     parser.add_argument('--partitions', nargs='+', default=['train2015', 'test2015'], type=str)
-    parser.add_argument('--num-workers', default=8, type=int)
+    parser.add_argument('--num-workers', default=2, type=int)
     parser.add_argument('--data-root', default='./hicodet')
 
     # training parameters
@@ -188,7 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--pretrained', default='', help='Path to a pretrained detector')
     parser.add_argument('--resume', default='', help='Resume from a model')
     parser.add_argument('--output-dir', default='checkpoints')
-    parser.add_argument('--print-interval', default=500, type=int)
+    parser.add_argument('--print-interval', default=100, type=int)
     parser.add_argument('--world-size', default=8, type=int)
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--cache', action='store_true')

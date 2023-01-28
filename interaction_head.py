@@ -7,6 +7,7 @@ The Australian National University
 Microsoft Research Asia
 """
 
+import copy
 import torch
 import torch.nn.functional as F
 
@@ -17,6 +18,10 @@ from collections import OrderedDict
 import pocket
 
 from ops import compute_spatial_encodings
+
+import sys
+sys.path.append('detr')
+from models.transformer import build_transformer
 
 class MultiBranchFusion(nn.Module):
     """
@@ -173,6 +178,102 @@ class ModifiedEncoder(nn.Module):
             attn_weights.append(attn)
         return x, attn_weights
 
+
+class TransformerDecoderLayer(nn.Module):
+
+    def __init__(self, q_size, kv_size, num_heads, ffn_interm_size=2048, dropout=0.1):
+        super().__init__()
+        self.q_size = q_size
+        self.kv_size = kv_size
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.ffn_interm_size = ffn_interm_size
+
+        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
+        self.qk_attn = nn.MultiheadAttention(
+            q_size, num_heads,
+            kdim=kv_size, vdim=kv_size,
+            dropout=dropout
+        )
+        self.ffn = nn.Sequential([
+            nn.Linear(q_size, ffn_interm_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_size, q_size)
+        ])
+        self.ln1 = nn.LayerNorm(q_size)
+        self.ln2 = nn.LayerNorm(q_size)
+        self.ln3 = nn.LayerNorm(q_size)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
+        self.dp3 = nn.Dropout(dropout)
+
+    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+        return tensor if pos is None else tensor + pos
+
+    def forward(self, tgt, memory,
+                     tgt_mask: Optional[Tensor] = None,
+                     memory_mask: Optional[Tensor] = None,
+                     tgt_key_padding_mask: Optional[Tensor] = None,
+                     memory_key_padding_mask: Optional[Tensor] = None,
+                     pos: Optional[Tensor] = None,
+                     query_pos: Optional[Tensor] = None):
+        q = k = self.with_pos_embed(tgt, query_pos)
+        tgt2 = self.q_attn(q, k, value=tgt, attn_mask=tgt_mask,
+                              key_padding_mask=tgt_key_padding_mask)[0]
+        tgt = tgt + self.dp1(tgt2)
+        tgt = self.ln1(tgt)
+        tgt2 = self.qk_attn(query=self.with_pos_embed(tgt, query_pos),
+                                key=self.with_pos_embed(memory, pos),
+                                value=memory, attn_mask=memory_mask,
+                                key_padding_mask=memory_key_padding_mask)[0]
+        tgt = tgt + self.dp2(tgt2)
+        tgt = self.ln2(tgt)
+        tgt2 = self.ffn(tgt)
+        tgt = tgt + self.dp3(tgt2)
+        tgt = self.ln3(tgt)
+        return tgt
+
+class TransformerDecoder(nn.Module):
+
+    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.norm = nn.LayerNorm(decoder_layer.q_size)
+        self.return_intermediate = return_intermediate
+
+    def forward(self, tgt, memory,
+                tgt_mask: Optional[Tensor] = None,
+                memory_mask: Optional[Tensor] = None,
+                tgt_key_padding_mask: Optional[Tensor] = None,
+                memory_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                query_pos: Optional[Tensor] = None):
+        output = tgt
+
+        intermediate = []
+
+        for layer in self.layers:
+            output = layer(output, memory, tgt_mask=tgt_mask,
+                           memory_mask=memory_mask,
+                           tgt_key_padding_mask=tgt_key_padding_mask,
+                           memory_key_padding_mask=memory_key_padding_mask,
+                           pos=pos, query_pos=query_pos)
+            if self.return_intermediate:
+                intermediate.append(self.norm(output))
+
+        if self.norm is not None:
+            output = self.norm(output)
+            if self.return_intermediate:
+                intermediate.pop()
+                intermediate.append(output)
+
+        if self.return_intermediate:
+            return torch.stack(intermediate)
+
+        return output.unsqueeze(0)
+
 class InteractionHead(nn.Module):
     """
     Interaction head that constructs and classifies box pairs
@@ -273,8 +374,8 @@ class InteractionHead(nn.Module):
         """
         Parameters:
         -----------
-        features: OrderedDict
-            Feature maps returned by FPN
+        features: Tensor
+            Last feature map returned by FPN
         image_shapes: Tensor
             (B, 2) Image shapes, heights followed by widths
         region_props: List[dict]
@@ -344,19 +445,26 @@ class InteractionHead(nn.Module):
             # Reshape the spatial features
             box_pair_spatial_reshaped = box_pair_spatial.reshape(n, n, -1)
 
+            mm_query = self.mbf(
+                torch.cat([unary_tokens[x_keep], unary_tokens[y_keep]], 1),
+                box_pair_spatial_reshaped[x_keep, y_keep]
+            )
+
+            pairwise_tokens = mm_query
+
             # Run the cooperative layer
-            unary_tokens, unary_attn = self.coop_layer(unary_tokens, box_pair_spatial_reshaped)
+            # unary_tokens, unary_attn = self.coop_layer(unary_tokens, box_pair_spatial_reshaped)
             # Generate pairwise tokens with MBF
-            pairwise_tokens = torch.cat([
-                self.mbf(
-                    torch.cat([unary_tokens[x_keep], unary_tokens[y_keep]], 1),
-                    box_pair_spatial_reshaped[x_keep, y_keep]
-                ), self.mbf_g(
-                    global_features[b_idx, None],
-                    box_pair_spatial_reshaped[x_keep, y_keep])
-            ], dim=1)
+            # pairwise_tokens = torch.cat([
+            #     self.mbf(
+            #         torch.cat([unary_tokens[x_keep], unary_tokens[y_keep]], 1),
+            #         box_pair_spatial_reshaped[x_keep, y_keep]
+            #     ), self.mbf_g(
+            #         global_features[b_idx, None],
+            #         box_pair_spatial_reshaped[x_keep, y_keep])
+            # ], dim=1)
             # Run the competitive layer
-            pairwise_tokens, pairwise_attn = self.comp_layer(pairwise_tokens)
+            # pairwise_tokens, pairwise_attn = self.comp_layer(pairwise_tokens)
 
             pairwise_tokens_collated.append(pairwise_tokens)
             boxes_h_collated.append(x_keep)

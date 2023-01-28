@@ -19,10 +19,6 @@ import pocket
 
 from ops import compute_spatial_encodings
 
-import sys
-sys.path.append('detr')
-from models.transformer import build_transformer
-
 class MultiBranchFusion(nn.Module):
     """
     Multi-branch fusion module

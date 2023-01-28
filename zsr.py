@@ -44,7 +44,7 @@ def clip_forward(ctx, x):
     x = ctx.visual.layer2(x)
     x = ctx.visual.layer3(x)
     x = ctx.visual.layer4(x)
-    x = Resize(7, InterpolationMode.BICUBIC)(x)
+    # x = Resize(7, InterpolationMode.BICUBIC)(x)
     x = ctx.visual.attnpool(x)
 
     return x
@@ -55,6 +55,14 @@ def main(args):
     device = "cuda" if use_cuda else "cpu"
     model, preprocess = clip.load("RN50", device=device)
 
+    # Bilinear interpolation on the positional encodings
+    if args.resolution != 224:
+        size = args.resolution // 32
+        pe_cls, pe = model.visual.attnpool.positional_embedding.split([1, 49], dim=0)
+        pe = pe.reshape(1, 7, 7, 2048).permute(0, 3, 1, 2)
+        pe = Resize(size, InterpolationMode.BILINEAR)(pe).permute(0, 2, 3, 1).reshape(size ** 2, 2048)
+        model.visual.attnpool.positional_embedding = torch.nn.Parameter(torch.cat([pe_cls, pe], dim=0))
+
     def target_transform(t):
         labels = torch.zeros(600)
         labels[t["hoi"]] = 1
@@ -62,7 +70,7 @@ def main(args):
     dataset = HICODet(
         os.path.join(args.data_root, f"hico_20160224_det/images/{args.partition}"),
         os.path.join(args.data_root, f"instances_{args.partition}.json"),
-        transform=_transform(224), target_transform=target_transform
+        transform=_transform(args.resolution), target_transform=target_transform
     )
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size,
@@ -161,6 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--data-root", "-dr", type=str, default="hicodet")
     parser.add_argument("--partition", "-p", type=str, default="test2015")
     parser.add_argument("--batch-size", "-bs", type=int, default=128)
+    parser.add_argument("--resolution", "-r", type=int, default=224)
     parser.add_argument("--num-workers", "-nw", type=int, default=8)
     parser.add_argument("--map", action="store_true", default=False)
     parser.add_argument("--rec", action="store_true", default=False)

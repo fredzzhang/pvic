@@ -309,14 +309,17 @@ class TransformerDecoder(nn.Module):
             return_q_attn_weights: Optional[bool] = False,
             return_qk_attn_weights: Optional[bool] = False
         ):
+        # Add support for zero layers
+        if self.num_layers == 0:
+            return queries.unsqueeze(0)
 
-        output = queries
+        outputs = [queries,]
         intermediate = []
         q_attn_w = []
         qk_attn_w = []
         for layer in self.layers:
-            output = layer(
-                output, features,
+            outputs = layer(
+                outputs[0], features,
                 q_mask=q_mask, kv_mask=kv_mask,
                 q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_padding_mask,
@@ -325,16 +328,16 @@ class TransformerDecoder(nn.Module):
                 return_qk_attn_weights=return_qk_attn_weights
             )
             if self.return_intermediate:
-                intermediate.append(self.norm(output[0]))
+                intermediate.append(self.norm(outputs[0]))
             if return_q_attn_weights:
-                q_attn_w.append(output[1])
+                q_attn_w.append(outputs[1])
             if return_qk_attn_weights:
-                qk_attn_w.append(output[2])
+                qk_attn_w.append(outputs[2])
 
         if self.return_intermediate:
             return torch.stack(intermediate)
 
-        outputs = [intermediate[-1].unsqueeze(0),]
+        outputs = [self.norm(outputs[0]).unsqueeze(0),]
         if return_q_attn_weights:
             q_attn_w = torch.stack(q_attn_w)
             outputs.append(q_attn_w)

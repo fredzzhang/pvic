@@ -381,6 +381,34 @@ def box_xyxy_to_cxcywh(x):
          (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
 
+def compute_prior_scores(
+    x: Tensor, y: Tensor,
+    scores: Tensor, labels: Tensor,
+    num_classes: int, is_training: bool,
+    obj_cls_to_tgt_cls: list
+) -> Tensor:
+    prior_h = torch.zeros(len(x), num_classes, device=scores.device)
+    prior_o = torch.zeros_like(prior_h)
+
+    # Raise the power of object detection scores during inference
+    p = 1.0 if is_training else 2.8
+    s_h = scores[x].pow(p)
+    s_o = scores[y].pow(p)
+
+    # Map object class index to target class index
+    # Object class index to target class index is a one-to-many mapping
+    target_cls_idx = [obj_cls_to_tgt_cls[obj.item()]
+        for obj in labels[y]]
+    # Duplicate box pair indices for each target class
+    pair_idx = [i for i, tar in enumerate(target_cls_idx) for _ in tar]
+    # Flatten mapped target indices
+    flat_target_idx = [t for tar in target_cls_idx for t in tar]
+
+    prior_h[pair_idx, flat_target_idx] = s_h[pair_idx]
+    prior_o[pair_idx, flat_target_idx] = s_o[pair_idx]
+
+    return torch.stack([prior_h, prior_o])
+
 def compute_spatial_encodings(
     boxes_1: List[Tensor], boxes_2: List[Tensor],
     shapes: List[Tuple[int, int]], eps: float = 1e-10

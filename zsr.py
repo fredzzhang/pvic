@@ -111,10 +111,10 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
     rec = torch.zeros(6, 600)
     full = torch.zeros(1, 600)
     nuniqobj = torch.zeros(6, 2)
+    nuniqobj_all = []
     intr2obj = torch.as_tensor(dataloader.dataset.class_corr)[:, 1]
     for images, targets in tqdm(dataloader):
-        # image_features = model.encode_image(images.to(device))
-        image_features = clip_forward(model, images.to(device))
+        image_features = model.encode_image(images.to(device))
         image_features /= image_features.norm(dim=1, keepdim=True)
 
         cos = image_features @ class_embeddings.t()
@@ -130,6 +130,7 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
             nuniqobj[3, 0] += objs[:15].unique().numel()
             nuniqobj[4, 0] += objs[:25].unique().numel()
             nuniqobj[5, 0] += objs.unique().numel()
+            nuniqobj_all.append(objs.unique().numel())
         nuniqobj[:, 1] += len(obj_list)
         # Duplicate the rank once for each ground truth instance
         ref = rank[i]
@@ -163,6 +164,9 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
         f"k=50,\tfull: {rec[5].mean():.4f}, rare: {rec[5, dataloader.dataset.rare].mean():.4f}, "
         f"non-rare: {rec[5, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[5]:.2f}.\n"
     )
+
+    with open(f"nuniqobj_{len(nuniqobj_all)}.json", "w") as f:
+        json.dump(nuniqobj_all, f)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -21,6 +21,7 @@ from torchvision.ops.boxes import batched_nms, box_iou
 from ops import (
     binary_focal_loss_with_logits,
     compute_spatial_encodings,
+    prepare_region_proposals,
     pad_queries
 )
 from interaction_head import InteractionHead
@@ -137,12 +138,14 @@ class VerbMatcher(nn.Module):
 
         mm_queries = []
         dup_indices = []
+        triplet_indices = []
         for ho_q, objs in zip(ho_queries, object_types):
             mm_q_per_img = []
             dup_inds_per_img = []
+            trip_inds_per_img = []
             for i, o in enumerate(objs):
                 trip = self.obj_to_triplet(o.item())
-                present_trip = [t in triplet_embeds for t in trip]
+                present_trip = [t for t in trip if t in triplet_embeds]
                 dup = torch.ones(len(present_trip), device=device) * i
                 # Construct multi-modal queries
                 mm_q = self.mbf(
@@ -152,10 +155,12 @@ class VerbMatcher(nn.Module):
                 # Append matched human-verb-object triplets
                 mm_q_per_img.append(mm_q)
                 dup_inds_per_img.append(dup)
+                trip_inds_per_img.append(present_trip)
             mm_queries.append(torch.cat(mm_q_per_img))
             dup_indices.append(torch.cat(dup_inds_per_img))
+            triplet_indices.append(trip_inds_per_img)
 
-        return mm_queries, dup_indices
+        return mm_queries, dup_indices, triplet_indices
 
 class TransformerDecoderLayer(nn.Module):
 
@@ -412,13 +417,6 @@ class UPT(nn.Module):
         self.min_instances = min_instances
         self.max_instances = max_instances
 
-    def recover_boxes(self, boxes, size):
-        boxes = box_ops.box_cxcywh_to_xyxy(boxes)
-        h, w = size
-        scale_fct = torch.stack([w, h, w, h])
-        boxes = boxes * scale_fct
-        return boxes
-
     def associate_with_ground_truth(self, boxes_h, boxes_o, targets):
         n = boxes_h.shape[0]
         labels = torch.zeros(n, self.num_classes, device=boxes_h.device)
@@ -460,55 +458,6 @@ class UPT(nn.Module):
         )
 
         return loss / n_p
-
-    def prepare_region_proposals(self, results, hidden_states):
-        region_props = []
-        for res, hs in zip(results, hidden_states):
-            sc, lb, bx = res.values()
-
-            keep = batched_nms(bx, sc, lb, 0.5)
-            sc = sc[keep].view(-1)
-            lb = lb[keep].view(-1)
-            bx = bx[keep].view(-1, 4)
-            hs = hs[keep].view(-1, 256)
-
-            keep = torch.nonzero(sc >= self.box_score_thresh).squeeze(1)
-
-            is_human = lb == self.human_idx
-            hum = torch.nonzero(is_human).squeeze(1)
-            obj = torch.nonzero(is_human == 0).squeeze(1)
-            n_human = is_human[keep].sum(); n_object = len(keep) - n_human
-            # Keep the number of human and object instances in a specified interval
-            if n_human < self.min_instances:
-                keep_h = sc[hum].argsort(descending=True)[:self.min_instances]
-                keep_h = hum[keep_h]
-            elif n_human > self.max_instances:
-                keep_h = sc[hum].argsort(descending=True)[:self.max_instances]
-                keep_h = hum[keep_h]
-            else:
-                keep_h = torch.nonzero(is_human[keep]).squeeze(1)
-                keep_h = keep[keep_h]
-
-            if n_object < self.min_instances:
-                keep_o = sc[obj].argsort(descending=True)[:self.min_instances]
-                keep_o = obj[keep_o]
-            elif n_object > self.max_instances:
-                keep_o = sc[obj].argsort(descending=True)[:self.max_instances]
-                keep_o = obj[keep_o]
-            else:
-                keep_o = torch.nonzero(is_human[keep] == 0).squeeze(1)
-                keep_o = keep[keep_o]
-
-            keep = torch.cat([keep_h, keep_o])
-
-            region_props.append(dict(
-                boxes=bx[keep],
-                scores=sc[keep],
-                labels=lb[keep],
-                hidden_states=hs[keep]
-            ))
-
-        return region_props
 
     def postprocessing(self, boxes, bh, bo, logits, prior, objects, attn_maps, image_sizes):
         n = [len(b) for b in bh]
@@ -586,11 +535,17 @@ class UPT(nn.Module):
         # ---------------------------------- #
         # Stage two: interaction recognition #
         # ---------------------------------- #
-        region_props = self.prepare_region_proposals(results, hs[-1])
+        region_props = prepare_region_proposals(
+            results, hs[-1],
+            box_score_thresh=self.box_score_thresh,
+            human_idx=self.human_idx,
+            min_instances=self.min_instances,
+            max_instances=self.max_instances
+        )
         boxes = [r['boxes'] for r in region_props]
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
-        mm_queries, dup_inds = self.vb_matcher(ho_queries, object_types, None)
+        mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, None)
         mm_queries, q_padding_mask = pad_queries(mm_queries)
 
         mm_queries = self.decoder(

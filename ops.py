@@ -381,6 +381,20 @@ def box_xyxy_to_cxcywh(x):
          (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
 
+def pad_queries(queries):
+    b = len(queries)
+    k = queries[0].shape[1]
+    ns = [len(q) for q in queries]
+    device = queries[0].device
+    dtype = queries[0].dtype
+
+    padded_queries = torch.zeros(b, max(ns), k, device=device, dtype=dtype)
+    q_padding_mask = torch.zeros(b, max(ns), device=device, dtype=torch.bool)
+    for i, n in enumerate(ns):
+        padded_queries[i, :n] = queries[i]
+        q_padding_mask[i, n:] = True
+    return padded_queries, q_padding_mask
+
 def compute_prior_scores(
     x: Tensor, y: Tensor,
     scores: Tensor, labels: Tensor,

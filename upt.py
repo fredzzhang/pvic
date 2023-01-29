@@ -32,10 +32,7 @@ from util.misc import nested_tensor_from_tensor_list
 
 
 class MultiBranchFusion(nn.Module):
-    def __init__(self,
-        fst_mod_size: int, scd_mod_size: int,
-        repr_size: int, cardinality: int
-    ) -> None:
+    def __init__(self, fst_mod_size, scd_mod_size, repr_size, cardinality):
         super().__init__()
         self.cardinality = cardinality
 
@@ -63,12 +60,12 @@ class MultiBranchFusion(nn.Module):
         ]).sum(dim=0))
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, obj_cls_to_tgt_cls, human_idx=0):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
         self.human_idx = human_idx
-        self.obj_cls_to_tgt_cls = obj_cls_to_tgt_cls
+        self.obj_to_verb = obj_to_verb
 
         self.spatial_head = nn.Sequential(
             nn.Linear(36, 128), nn.ReLU(),
@@ -105,7 +102,7 @@ class HumanObjectMatcher(nn.Module):
             # Skip image when there are no valid human-object pairs
             if len(x_keep) == 0:
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
-                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                prior_scores.append(torch.zeros(0, 2, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
                 ho_queries.append(torch.zeros(0, self.repr_size, device=device))
                 continue
@@ -119,25 +116,45 @@ class HumanObjectMatcher(nn.Module):
                 torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
                 pairwise_spatial
             )
-            # Pair up the object detection scores
-            ps = compute_prior_scores(
-                x_keep, y_keep, scores, labels,
-                self.num_verbs, self.training,
-                self.obj_cls_to_tgt_cls
-            )
             # Append matched human-object pairs
-            paired_indices.append(torch.stack([x_keep, y_keep]))
-            prior_scores.append(ps)
+            paired_indices.append(torch.stack([x_keep, y_keep]), dim=1)
+            prior_scores.append(torch.stack([scores[x_keep], scores[y_keep]]), dim=1)
             object_types.append(labels[y_keep])
             ho_queries.append(ho_q)
 
         return ho_queries, paired_indices, prior_scores, object_types
 
 class VerbMatcher(nn.Module):
-    def __init__(self):
+    def __init__(self, repr_size, obj_to_triplet):
         super().__init__()
-    def forward(self, ho_queries):
-        pass
+        self.repr_size = repr_size
+        self.obj_to_triplet = obj_to_triplet
+
+        self.mbf = MultiBranchFusion(repr_size, 1024, repr_size, cardinality=8)
+    def forward(self, ho_queries, object_types, triplet_embeds):
+        device = ho_queries[0].device
+
+        mm_queries = []
+        dup_indices = []
+        for ho_q, objs in zip(ho_queries, object_types):
+            mm_q_per_img = []
+            dup_inds_per_img = []
+            for i, o in enumerate(objs):
+                trip = self.obj_to_triplet(o.item())
+                present_trip = [t in triplet_embeds for t in trip]
+                dup = torch.ones(len(present_trip), device=device) * i
+
+                mm_q = self.mbf(
+                    ho_q[i: i+1].repeat(len(dup), 1),
+                    torch.stack([triplet_embeds[t] for t in present_trip])
+                )
+                # Append matched multi-modal queries
+                mm_q_per_img.append(mm_q)
+                dup_inds_per_img.append(dup)
+            mm_queries.append(torch.cat(mm_q_per_img))
+            dup_indices.append(torch.cat(dup_inds_per_img))
+
+        return mm_queries, dup_indices
 
 class UPT(nn.Module):
     """

@@ -20,7 +20,8 @@ from torchvision.ops.boxes import batched_nms, box_iou
 
 from ops import (
     binary_focal_loss_with_logits,
-    compute_spatial_encodings
+    compute_spatial_encodings,
+    pad_queries
 )
 from interaction_head import InteractionHead
 
@@ -280,6 +281,13 @@ class TransformerDecoder(nn.Module):
         self.norm = nn.LayerNorm(decoder_layer.q_size)
         self.return_intermediate = return_intermediate
 
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
     def forward(self, queries, features,
             q_mask: Optional[Tensor] = None,
             kv_mask: Optional[Tensor] = None,
@@ -374,7 +382,23 @@ class UPT(nn.Module):
         self.query_embed = detector.query_embed
 
         self.postprocessor = postprocessor
-        self.interaction_head = interaction_head
+        self.ho_matcher = HumanObjectMatcher(
+            repr_size=384,
+            num_verbs=num_classes,
+            obj_to_verb=None,
+            human_idx=human_idx
+        )
+        self.vb_matcher = VerbMatcher(
+            repr_size=384,
+            obj_to_triplet=None,
+        )
+        decoder_layer = TransformerDecoderLayer(
+            q_size=384, kv_size=256, num_heads=8
+        )
+        self.decoder = TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=4
+        )
 
         self.human_idx = human_idx
         self.num_classes = num_classes
@@ -563,11 +587,18 @@ class UPT(nn.Module):
         # Stage two: interaction recognition #
         # ---------------------------------- #
         region_props = self.prepare_region_proposals(results, hs[-1])
-
-        logits, prior, bh, bo, objects, attn_maps = self.interaction_head(
-            memory, image_sizes, region_props
-        )
         boxes = [r['boxes'] for r in region_props]
+
+        ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
+        mm_queries, dup_inds = self.vb_matcher(ho_queries, object_types, None)
+        mm_queries, q_padding_mask = pad_queries(mm_queries)
+
+        mm_queries = self.decoder(
+            mm_queries, memory,
+            q_padding_mask=q_padding_mask,
+            kv_padding_mask=mask,
+            kv_pos=pos[-1]
+        )
 
         if self.training:
             interaction_loss = self.compute_interaction_loss(boxes, bh, bo, logits, prior, targets)

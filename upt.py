@@ -9,6 +9,7 @@ Microsoft Research Asia
 
 import os
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 
 
@@ -16,7 +17,11 @@ from torch import nn, Tensor
 from typing import Optional, List
 from torchvision.ops.boxes import batched_nms, box_iou
 
-from ops import binary_focal_loss_with_logits
+from ops import (
+    binary_focal_loss_with_logits,
+    compute_spatial_encodings,
+    compute_prior_scores
+)
 from interaction_head import InteractionHead
 
 import sys
@@ -24,6 +29,115 @@ sys.path.append('detr')
 from models import build_model
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
+
+
+class MultiBranchFusion(nn.Module):
+    def __init__(self,
+        fst_mod_size: int, scd_mod_size: int,
+        repr_size: int, cardinality: int
+    ) -> None:
+        super().__init__()
+        self.cardinality = cardinality
+
+        sub_repr_size = int(repr_size / cardinality)
+        assert sub_repr_size * cardinality == repr_size, \
+            "The given representation size should be divisible by cardinality."
+
+        self.fc_1 = nn.ModuleList([
+            nn.Linear(fst_mod_size, sub_repr_size)
+            for _ in range(cardinality)
+        ])
+        self.fc_2 = nn.ModuleList([
+            nn.Linear(scd_mod_size, sub_repr_size)
+            for _ in range(cardinality)
+        ])
+        self.fc_3 = nn.ModuleList([
+            nn.Linear(sub_repr_size, repr_size)
+            for _ in range(cardinality)
+        ])
+    def forward(self, fst_mod: Tensor, scd_mod: Tensor) -> Tensor:
+        return F.relu(torch.stack([
+            fc_3(F.relu(fc_1(fst_mod) * fc_2(scd_mod)))
+            for fc_1, fc_2, fc_3
+            in zip(self.fc_1, self.fc_2, self.fc_3)
+        ]).sum(dim=0))
+
+class HumanObjectMatcher(nn.Module):
+    def __init__(self, repr_size, num_verbs, obj_cls_to_tgt_cls, human_idx=0):
+        super().__init__()
+        self.repr_size = repr_size
+        self.num_verbs = num_verbs
+        self.human_idx = human_idx
+        self.obj_cls_to_tgt_cls = obj_cls_to_tgt_cls
+
+        self.spatial_head = nn.Sequential(
+            nn.Linear(36, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, repr_size), nn.ReLU(),
+        )
+        self.mbf = MultiBranchFusion(512, repr_size, repr_size, cardinality=8)
+
+    def check_human_instances(self, labels):
+        is_human = labels == self.human_idx
+        n_h = torch.sum(is_human)
+        if not torch.all(labels[:n_h]==self.human_idx):
+            raise AssertionError("Human instances are not permuted to the top!")
+        return n_h
+
+    def forward(self, region_props, image_sizes, device=None):
+        if device is None:
+            device = region_props[0]["hidden_states"].device
+
+        paired_indices = []
+        prior_scores = []
+        object_types = []
+        ho_queries = []
+        for i, rp in enumerate(region_props):
+            boxes, scores, labels, embeds = rp.values()
+            nh = self.check_human_instances(labels)
+            n = len(boxes)
+            # Enumerate instance pairs
+            x, y = torch.meshgrid(
+                torch.arange(n, device=device),
+                torch.arange(n, device=device)
+            )
+            x_keep, y_keep = torch.nonzero(torch.logical_and(x != y, x < nh)).unbind(1)
+            # Skip image when there are no valid human-object pairs
+            if len(x_keep) == 0:
+                paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
+                continue
+            # Compute spatial features
+            pairwise_spatial = compute_spatial_encodings(
+                boxes[x_keep], boxes[y_keep], [image_sizes[i]]
+            )
+            pairwise_spatial = self.spatial_head(pairwise_spatial)
+            # Compute human-object queries
+            ho_q = self.mbf(
+                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
+                pairwise_spatial
+            )
+            # Pair up the object detection scores
+            ps = compute_prior_scores(
+                x_keep, y_keep, scores, labels,
+                self.num_verbs, self.training,
+                self.obj_cls_to_tgt_cls
+            )
+            # Append matched human-object pairs
+            paired_indices.append(torch.stack([x_keep, y_keep]))
+            prior_scores.append(ps)
+            object_types.append(labels[y_keep])
+            ho_queries.append(ho_q)
+
+        return ho_queries, paired_indices, prior_scores, object_types
+
+class VerbMatcher(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, ho_queries):
+        pass
 
 class UPT(nn.Module):
     """
@@ -64,7 +178,13 @@ class UPT(nn.Module):
         min_instances: int = 3, max_instances: int = 15,
     ) -> None:
         super().__init__()
-        self.detector = detector
+        self.backbone = detector.backbone
+        self.transformer = detector.transformer
+        self.class_embed = detector.class_embed
+        self.bbox_embed = detector.bbox_embed
+        self.input_proj = detector.input_proj
+        self.query_embed = detector.query_embed
+
         self.postprocessor = postprocessor
         self.interaction_head = interaction_head
 
@@ -234,23 +354,30 @@ class UPT(nn.Module):
             im.size()[-2:] for im in images
         ], device=images[0].device)
 
+        # --------------------------- #
+        # Stage one: object detection #
+        # --------------------------- #
         if isinstance(images, (list, torch.Tensor)):
             images = nested_tensor_from_tensor_list(images)
-        features, pos = self.detector.backbone(images)
+        features, pos = self.backbone(images)
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = self.detector.transformer(self.detector.input_proj(src), mask, self.detector.query_embed.weight, pos[-1])[0]
+        hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])
 
-        outputs_class = self.detector.class_embed(hs)
-        outputs_coord = self.detector.bbox_embed(hs).sigmoid()
+        outputs_class = self.class_embed(hs)
+        outputs_coord = self.bbox_embed(hs).sigmoid()
 
         results = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         results = self.postprocessor(results, image_sizes)
+
+        # ---------------------------------- #
+        # Stage two: interaction recognition #
+        # ---------------------------------- #
         region_props = self.prepare_region_proposals(results, hs[-1])
 
         logits, prior, bh, bo, objects, attn_maps = self.interaction_head(
-            features[-1].tensors, image_sizes, region_props
+            memory, image_sizes, region_props
         )
         boxes = [r['boxes'] for r in region_props]
 

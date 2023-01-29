@@ -369,6 +369,73 @@ class SetCriterion(nn.Module):
 
         return loss_dict
 
+def prepare_region_proposals(
+    results, hidden_states,
+    box_score_thresh, human_idx,
+    min_instances, max_instances
+):
+    region_props = []
+    for res, hs in zip(results, hidden_states):
+        sc, lb, bx = res.values()
+
+        keep = box_ops.batched_nms(bx, sc, lb, 0.5)
+        sc = sc[keep].view(-1)
+        lb = lb[keep].view(-1)
+        bx = bx[keep].view(-1, 4)
+        hs = hs[keep].view(-1, 256)
+
+        keep = torch.nonzero(sc >= box_score_thresh).squeeze(1)
+
+        is_human = lb == human_idx
+        hum = torch.nonzero(is_human).squeeze(1)
+        obj = torch.nonzero(is_human == 0).squeeze(1)
+        n_human = is_human[keep].sum(); n_object = len(keep) - n_human
+        # Keep the number of human and object instances in a specified interval
+        if n_human < min_instances:
+            keep_h = sc[hum].argsort(descending=True)[:min_instances]
+            keep_h = hum[keep_h]
+        elif n_human > max_instances:
+            keep_h = sc[hum].argsort(descending=True)[:max_instances]
+            keep_h = hum[keep_h]
+        else:
+            keep_h = torch.nonzero(is_human[keep]).squeeze(1)
+            keep_h = keep[keep_h]
+
+        if n_object < min_instances:
+            keep_o = sc[obj].argsort(descending=True)[:min_instances]
+            keep_o = obj[keep_o]
+        elif n_object > max_instances:
+            keep_o = sc[obj].argsort(descending=True)[:max_instances]
+            keep_o = obj[keep_o]
+        else:
+            keep_o = torch.nonzero(is_human[keep] == 0).squeeze(1)
+            keep_o = keep[keep_o]
+
+        keep = torch.cat([keep_h, keep_o])
+
+        region_props.append(dict(
+            boxes=bx[keep],
+            scores=sc[keep],
+            labels=lb[keep],
+            hidden_states=hs[keep]
+        ))
+
+    return region_props
+
+def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets):
+    labels = []
+    for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
+        bx_h, bx_o = bx[p_inds].unbind(1)
+        gt_bx_h = target["boxes_h"]
+        # NOTE to continue
+
+def recover_boxes(boxes, size):
+    boxes = box_ops.box_cxcywh_to_xyxy(boxes)
+    h, w = size
+    scale_fct = torch.stack([w, h, w, h])
+    boxes = boxes * scale_fct
+    return boxes
+
 def box_cxcywh_to_xyxy(x):
     x_c, y_c, w, h = x.unbind(-1)
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),

@@ -16,7 +16,6 @@ import torch.distributed as dist
 
 from torch import nn, Tensor
 from typing import Optional, List
-from torchvision.ops.boxes import batched_nms, box_iou
 
 from ops import (
     binary_focal_loss_with_logits,
@@ -30,7 +29,6 @@ from interaction_head import InteractionHead
 import sys
 sys.path.append('detr')
 from models import build_model
-from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 
 
@@ -424,22 +422,6 @@ class UPT(nn.Module):
         self.min_instances = min_instances
         self.max_instances = max_instances
 
-    def associate_with_ground_truth(self, boxes_h, boxes_o, targets):
-        n = boxes_h.shape[0]
-        labels = torch.zeros(n, self.num_classes, device=boxes_h.device)
-
-        gt_bx_h = self.recover_boxes(targets['boxes_h'], targets['size'])
-        gt_bx_o = self.recover_boxes(targets['boxes_o'], targets['size'])
-
-        x, y = torch.nonzero(torch.min(
-            box_iou(boxes_h, gt_bx_h),
-            box_iou(boxes_o, gt_bx_o)
-        ) >= self.fg_iou_thresh).unbind(1)
-
-        labels[x, targets['labels'][y]] = 1
-
-        return labels
-
     def compute_classification_loss(self, logits, prior, labels):
 
         n_p = labels.sum()
@@ -450,6 +432,7 @@ class UPT(nn.Module):
             dist.all_reduce(n_p)
             n_p = (n_p / world_size).item()
 
+        prior = prior.prod(1)
         loss = binary_focal_loss_with_logits(
             torch.log(
                 prior / (1 + torch.exp(-logits) - prior) + 1e-8
@@ -459,21 +442,33 @@ class UPT(nn.Module):
 
         return loss / n_p
 
-    def postprocessing(self, boxes, bh, bo, logits, prior, objects, attn_maps, image_sizes):
-        n = [len(b) for b in bh]
+    def postprocessing(self,
+            boxes, paired_inds, dup_inds,
+            triplet_inds, object_types,
+            logits, prior, image_sizes
+        ):
+        n = []
+        dup_paired_inds = []
+        dup_object_types = []
+        for p_inds, d_inds,objs in zip(paired_inds, dup_inds, object_types):
+            dup_paired_inds.append(p_inds[d_inds])
+            dup_object_types.append(objs[d_inds])
+            n.append(len(d_inds))
+
         logits = logits.split(n)
+        prior = prior.split(n)
 
         detections = []
-        for bx, h, o, lg, pr, obj, attn, size in zip(
-            boxes, bh, bo, logits, prior, objects, attn_maps, image_sizes
+        for bx, dp_inds, pred, objs, lg, pr, size in zip(
+            boxes, dup_paired_inds, triplet_inds, dup_object_types,
+            logits, prior, image_sizes
         ):
-            pr = pr.prod(0)
-            x, y = torch.nonzero(pr).unbind(1)
-            scores = torch.sigmoid(lg[x, y])
+            pr = pr.prod(1)
+            scores = lg.sigmoid() * pr
+            pred = torch.cat([torch.as_tensor(p, device=scores.device) for p in pred])
             detections.append(dict(
-                boxes=bx, pairing=torch.stack([h[x], o[x]]),
-                scores=scores * pr[x, y], labels=y,
-                objects=obj[x], attn_maps=attn, size=size
+                boxes=bx, pairing=dp_inds, scores=scores,
+                labels=pred, objects=objs, size=size
             ))
 
         return detections
@@ -553,7 +548,7 @@ class UPT(nn.Module):
             q_padding_mask=q_padding_mask,
             kv_padding_mask=mask,
             kv_pos=pos[-1]
-        )
+        )[0]
         mm_queries_collate = torch.cat([
             mm_q[q_p_m] for mm_q, q_p_m
             in zip(padded_queries, q_padding_mask)
@@ -574,7 +569,11 @@ class UPT(nn.Module):
             )
             return loss_dict
 
-        detections = self.postprocessing(boxes, bh, bo, logits, prior, objects, attn_maps, image_sizes)
+        detections = self.postprocessing(
+            boxes, paired_inds, dup_inds,
+            triplet_inds, object_types,
+            logits, prior_collate, image_sizes
+        )
         return detections
 
 def build_detector(args, class_corr):

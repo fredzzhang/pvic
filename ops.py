@@ -422,12 +422,24 @@ def prepare_region_proposals(
 
     return region_props
 
-def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets):
+def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_classes, thresh=0.5):
     labels = []
     for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
+        is_match = torch.zeros(len(paired_inds), num_classes, device=bx.device)
+
         bx_h, bx_o = bx[p_inds].unbind(1)
-        gt_bx_h = target["boxes_h"]
-        # NOTE to continue
+        gt_bx_h = recover_boxes(target["boxes_h"], target["size"])
+        gt_bx_o = recover_boxes(target["boxes_o"], target["size"])
+
+        x, y = torch.nonzero(torch.min(
+            box_ops.box_iou(bx_h, gt_bx_h),
+            box_ops.box_iou(bx_o, gt_bx_o)
+        ) >= thresh).unbind(1)
+        is_match[x, target["labels"][y]] = 1
+
+        lab_per_img = torch.cat([is_match[i, t] for i, t in enumerate(t_inds)])
+        labels.append(lab_per_img)
+    return torch.cat(labels)
 
 def recover_boxes(boxes, size):
     boxes = box_ops.box_cxcywh_to_xyxy(boxes)

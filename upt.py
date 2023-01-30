@@ -22,6 +22,7 @@ from ops import (
     binary_focal_loss_with_logits,
     compute_spatial_encodings,
     prepare_region_proposals,
+    associate_with_ground_truth,
     pad_queries
 )
 from interaction_head import InteractionHead
@@ -373,7 +374,8 @@ class UPT(nn.Module):
         detector: nn.Module,
         postprocessor: nn.Module,
         interaction_head: nn.Module,
-        human_idx: int, num_classes: int,
+        human_idx: int, num_verbs: int, num_triplets: int,
+        repr_size: int = 384,
         alpha: float = 0.5, gamma: float = 2.0,
         box_score_thresh: float = 0.2, fg_iou_thresh: float = 0.5,
         min_instances: int = 3, max_instances: int = 15,
@@ -388,25 +390,30 @@ class UPT(nn.Module):
 
         self.postprocessor = postprocessor
         self.ho_matcher = HumanObjectMatcher(
-            repr_size=384,
-            num_verbs=num_classes,
+            repr_size=repr_size,
+            num_verbs=num_verbs,
             obj_to_verb=None,
             human_idx=human_idx
         )
         self.vb_matcher = VerbMatcher(
-            repr_size=384,
+            repr_size=repr_size,
             obj_to_triplet=None,
         )
         decoder_layer = TransformerDecoderLayer(
-            q_size=384, kv_size=256, num_heads=8
+            q_size=repr_size,
+            kv_size=self.query_embed.shape[1],
+            num_heads=8
         )
         self.decoder = TransformerDecoder(
             decoder_layer=decoder_layer,
             num_layers=4
         )
+        self.binary_classifier = nn.Linear(repr_size, 1)
 
         self.human_idx = human_idx
-        self.num_classes = num_classes
+        self.num_verbs = num_verbs
+        self.num_triplets = num_triplets
+        self.repr_size = repr_size
 
         self.alpha = alpha
         self.gamma = gamma
@@ -433,16 +440,9 @@ class UPT(nn.Module):
 
         return labels
 
-    def compute_interaction_loss(self, boxes, bh, bo, logits, prior, targets):
-        labels = torch.cat([
-            self.associate_with_ground_truth(bx[h], bx[o], target)
-            for bx, h, o, target in zip(boxes, bh, bo, targets)
-        ])
-        prior = torch.cat(prior, dim=1).prod(0)
-        x, y = torch.nonzero(prior).unbind(1)
-        logits = logits[x, y]; prior = prior[x, y]; labels = labels[x, y]
+    def compute_classification_loss(self, logits, prior, labels):
 
-        n_p = len(torch.nonzero(labels))
+        n_p = labels.sum()
         if dist.is_initialized():
             world_size = dist.get_world_size()
             n_p = torch.as_tensor([n_p], device='cuda')
@@ -546,19 +546,31 @@ class UPT(nn.Module):
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
         mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, None)
-        mm_queries, q_padding_mask = pad_queries(mm_queries)
+        padded_queries, q_padding_mask = pad_queries(mm_queries)
 
-        mm_queries = self.decoder(
-            mm_queries, memory,
+        padded_queries = self.decoder(
+            padded_queries, memory,
             q_padding_mask=q_padding_mask,
             kv_padding_mask=mask,
             kv_pos=pos[-1]
         )
+        mm_queries_collate = torch.cat([
+            mm_q[q_p_m] for mm_q, q_p_m
+            in zip(padded_queries, q_padding_mask)
+        ])
+        logits = self.binary_classifier(mm_queries_collate)
+        prior_collate = torch.cat([
+            p[d] for p, d in zip(prior_scores, dup_inds)
+        ])
 
         if self.training:
-            interaction_loss = self.compute_interaction_loss(boxes, bh, bo, logits, prior, targets)
+            labels = associate_with_ground_truth(
+                boxes, paired_inds, triplet_inds,
+                targets, self.num_triplets
+            )
+            cls_loss = self.compute_classification_loss(logits, prior_collate, labels)
             loss_dict = dict(
-                interaction_loss=interaction_loss
+                cls_loss=cls_loss
             )
             return loss_dict
 

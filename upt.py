@@ -24,7 +24,6 @@ from ops import (
     associate_with_ground_truth,
     pad_queries
 )
-from interaction_head import InteractionHead
 
 import sys
 sys.path.append('detr')
@@ -85,10 +84,10 @@ class HumanObjectMatcher(nn.Module):
         if device is None:
             device = region_props[0]["hidden_states"].device
 
+        ho_queries = []
         paired_indices = []
         prior_scores = []
         object_types = []
-        ho_queries = []
         for i, rp in enumerate(region_props):
             boxes, scores, labels, embeds = rp.values()
             nh = self.check_human_instances(labels)
@@ -101,14 +100,14 @@ class HumanObjectMatcher(nn.Module):
             x_keep, y_keep = torch.nonzero(torch.logical_and(x != y, x < nh)).unbind(1)
             # Skip image when there are no valid human-object pairs
             if len(x_keep) == 0:
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
                 prior_scores.append(torch.zeros(0, 2, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
-                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
                 continue
             # Compute spatial features
             pairwise_spatial = compute_spatial_encodings(
-                boxes[x_keep], boxes[y_keep], [image_sizes[i]]
+                [boxes[x_keep],], [boxes[y_keep],], [image_sizes[i],]
             )
             pairwise_spatial = self.spatial_head(pairwise_spatial)
             # Compute human-object queries
@@ -117,38 +116,39 @@ class HumanObjectMatcher(nn.Module):
                 pairwise_spatial
             )
             # Append matched human-object pairs
-            paired_indices.append(torch.stack([x_keep, y_keep]), dim=1)
-            prior_scores.append(torch.stack([scores[x_keep], scores[y_keep]]), dim=1)
-            object_types.append(labels[y_keep])
             ho_queries.append(ho_q)
+            paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
+            prior_scores.append(torch.stack([scores[x_keep], scores[y_keep]], dim=1))
+            object_types.append(labels[y_keep])
 
         return ho_queries, paired_indices, prior_scores, object_types
 
 class VerbMatcher(nn.Module):
-    def __init__(self, repr_size, obj_to_triplet):
+    def __init__(self, repr_size, obj_to_triplet, triplet_embeds):
         super().__init__()
         self.repr_size = repr_size
         self.obj_to_triplet = obj_to_triplet
+        self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
 
-        self.mbf = MultiBranchFusion(repr_size, 1024, repr_size, cardinality=8)
-    def forward(self, ho_queries, object_types, triplet_embeds):
+        self.mbf = MultiBranchFusion(repr_size, triplet_embeds.shape[1], repr_size, cardinality=8)
+    def forward(self, ho_queries, object_types, triplet_cands):
         device = ho_queries[0].device
 
         mm_queries = []
         dup_indices = []
         triplet_indices = []
-        for ho_q, objs in zip(ho_queries, object_types):
+        for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
             mm_q_per_img = []
             dup_inds_per_img = []
             trip_inds_per_img = []
             for i, o in enumerate(objs):
-                trip = self.obj_to_triplet(o.item())
-                present_trip = [t for t in trip if t in triplet_embeds]
+                trip = self.obj_to_triplet[o.item()]
+                present_trip = [t for t in trip if t in t_cands]
                 dup = torch.ones(len(present_trip), device=device) * i
                 # Construct multi-modal queries
                 mm_q = self.mbf(
                     ho_q[i: i+1].repeat(len(dup), 1),
-                    torch.stack([triplet_embeds[t] for t in present_trip])
+                    torch.stack([self.triplet_embeds[t] for t in present_trip])
                 )
                 # Append matched human-verb-object triplets
                 mm_q_per_img.append(mm_q)
@@ -187,18 +187,18 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = dropout
         self.ffn_interm_size = ffn_interm_size
 
-        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
+        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout, batch_first=True)
         self.qk_attn = nn.MultiheadAttention(
             q_size, num_heads,
             kdim=kv_size, vdim=kv_size,
-            dropout=dropout
+            dropout=dropout, batch_first=True
         )
-        self.ffn = nn.Sequential([
+        self.ffn = nn.Sequential(
             nn.Linear(q_size, ffn_interm_size),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(ffn_interm_size, q_size)
-        ])
+        )
         self.ln1 = nn.LayerNorm(q_size)
         self.ln2 = nn.LayerNorm(q_size)
         self.ln3 = nn.LayerNorm(q_size)
@@ -368,8 +368,11 @@ class UPT(nn.Module):
         Maximum number of instances (human or object) to sample
     """
     def __init__(self,
-        detector: nn.Module, postprocessor: nn.Module,
-        triplet_decoder: nn.Module, obj_to_triplet: list,
+        detector: nn.Module,
+        postprocessor: nn.Module,
+        triplet_decoder: nn.Module,
+        triplet_embeds: Tensor,
+        obj_to_triplet: list,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
@@ -393,6 +396,7 @@ class UPT(nn.Module):
         self.vb_matcher = VerbMatcher(
             repr_size=repr_size,
             obj_to_triplet=obj_to_triplet,
+            triplet_embeds=triplet_embeds
         )
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, 1)
@@ -406,6 +410,20 @@ class UPT(nn.Module):
         self.box_score_thresh = box_score_thresh
         self.min_instances = min_instances
         self.max_instances = max_instances
+
+    def freeze_detector(self):
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        for p in self.transformer.parameters():
+            p.requires_grad = False
+        for p in self.class_embed.parameters():
+            p.requires_grad = False
+        for p in self.bbox_embed.parameters():
+            p.requires_grad = False
+        for p in self.input_proj.parameters():
+            p.requires_grad = False
+        for p in self.query_embed.parameters():
+            p.requires_grad = False
 
     def compute_classification_loss(self, logits, prior, labels):
 
@@ -460,6 +478,7 @@ class UPT(nn.Module):
 
     def forward(self,
         images: List[Tensor],
+        triplet_cands: Optional[List[int]] = None,
         targets: Optional[List[dict]] = None
     ) -> List[dict]:
         """
@@ -516,7 +535,7 @@ class UPT(nn.Module):
         # Stage two: interaction recognition #
         # ---------------------------------- #
         region_props = prepare_region_proposals(
-            results, hs[-1],
+            results, hs[-1], image_sizes,
             box_score_thresh=self.box_score_thresh,
             human_idx=self.human_idx,
             min_instances=self.min_instances,
@@ -525,7 +544,9 @@ class UPT(nn.Module):
         boxes = [r['boxes'] for r in region_props]
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
-        mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, None)
+        if triplet_cands is None:
+            triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
+        mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         padded_queries, q_padding_mask = pad_queries(mm_queries)
 
         padded_queries = self.decoder(
@@ -568,6 +589,11 @@ def build_detector(args, obj_to_triplet):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
+    if os.path.exists(args.triplet_embeds):
+        triplet_embeds = torch.load(args.triplet_embeds)
+    else:
+        raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
+
     decoder_layer = TransformerDecoderLayer(
         q_size=args.repr_dim, kv_size=args.hidden_dim,
         num_heads=args.nheads, dropout=args.dropout
@@ -578,7 +604,8 @@ def build_detector(args, obj_to_triplet):
     )
     detector = UPT(
         detr, postprocessors['bbox'],
-        triplet_decoder, obj_to_triplet,
+        triplet_decoder, triplet_embeds,
+        obj_to_triplet,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,
         repr_size=args.repr_dim,

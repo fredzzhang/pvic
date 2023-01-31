@@ -84,7 +84,6 @@ def main(rank, args):
     engine = CustomisedDLE(
         upt, train_loader, test_loader,
         max_norm=args.clip_max_norm,
-        num_classes=args.num_classes,
         print_interval=args.print_interval,
         find_unused_parameters=True,
         cache_dir=args.output_dir
@@ -112,16 +111,9 @@ def main(rank, args):
             )
         return
 
-    for p in upt.detector.parameters():
-        p.requires_grad = False
-    param_dicts = [{
-        "params": [p for n, p in upt.named_parameters()
-        if "interaction_head" in n and p.requires_grad]
-    }]
-    optim = torch.optim.AdamW(
-        param_dicts, lr=args.lr_head,
-        weight_decay=args.weight_decay
-    )
+    upt.freeze_detector()
+    param_dicts = [{"params": [p for p in upt.parameters() if p.requires_grad]}]
+    optim = torch.optim.AdamW(param_dicts, lr=args.lr_head, weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_drop)
     # Override optimiser and learning rate scheduler
     engine.update_state_key(optimizer=optim, lr_scheduler=lr_scheduler)
@@ -158,12 +150,14 @@ if __name__ == '__main__':
     parser.add_argument('--hidden-dim', default=256, type=int)
     parser.add_argument('--enc-layers', default=6, type=int)
     parser.add_argument('--dec-layers', default=6, type=int)
-    parser.add_argument('--triplet-dec-layers', default=4, type=int)
     parser.add_argument('--dim-feedforward', default=2048, type=int)
     parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--nheads', default=8, type=int)
     parser.add_argument('--num-queries', default=100, type=int)
     parser.add_argument('--pre-norm', action='store_true')
+
+    parser.add_argument('--triplet-dec-layers', default=4, type=int)
+    parser.add_argument('--triplet-embeds', required=True, type=str)
 
     parser.add_argument('--no-aux-loss', dest='aux_loss', action='store_false')
     parser.add_argument('--set-cost-class', default=1, type=float)

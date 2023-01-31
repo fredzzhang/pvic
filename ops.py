@@ -370,12 +370,12 @@ class SetCriterion(nn.Module):
         return loss_dict
 
 def prepare_region_proposals(
-    results, hidden_states,
+    results, hidden_states, image_sizes,
     box_score_thresh, human_idx,
     min_instances, max_instances
 ):
     region_props = []
-    for res, hs in zip(results, hidden_states):
+    for res, hs, sz in zip(results, hidden_states, image_sizes):
         sc, lb, bx = res.values()
 
         keep = box_ops.batched_nms(bx, sc, lb, 0.5)
@@ -383,6 +383,11 @@ def prepare_region_proposals(
         lb = lb[keep].view(-1)
         bx = bx[keep].view(-1, 4)
         hs = hs[keep].view(-1, 256)
+
+        # Clamp boxes to image
+        bx[:, :2].clamp_(min=0)
+        bx[:, 2].clamp_(max=sz[1])
+        bx[:, 3].clamp_(max=sz[0])
 
         keep = torch.nonzero(sc >= box_score_thresh).squeeze(1)
 

@@ -63,13 +63,14 @@ def main(rank, args):
             rank=rank)
     )
 
-    args.human_idx = 0
     if args.dataset == 'hicodet':
-        object_to_target = train_loader.dataset.dataset.object_to_verb
-        args.num_classes = 117
+        object_to_target = train_loader.dataset.dataset.object_to_interaction
+        args.num_verbs = 117
+        args.num_triplets = 600
     elif args.dataset == 'vcoco':
+        # TODO add obj_to_triplet, number of triplets
         object_to_target = list(train_loader.dataset.dataset.object_to_action.values())
-        args.num_classes = 24
+        args.num_verbs = 24
     
     upt = build_detector(args, object_to_target)
 
@@ -153,10 +154,11 @@ if __name__ == '__main__':
     parser.add_argument('--dilation', action='store_true')
     parser.add_argument('--position-embedding', default='sine', type=str, choices=('sine', 'learned'))
 
-    parser.add_argument('--repr-dim', default=512, type=int)
+    parser.add_argument('--repr-dim', default=384, type=int)
     parser.add_argument('--hidden-dim', default=256, type=int)
     parser.add_argument('--enc-layers', default=6, type=int)
     parser.add_argument('--dec-layers', default=6, type=int)
+    parser.add_argument('--triplet-dec-layers', default=4, type=int)
     parser.add_argument('--dim-feedforward', default=2048, type=int)
     parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--nheads', default=8, type=int)

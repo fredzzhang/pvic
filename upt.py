@@ -61,12 +61,11 @@ class MultiBranchFusion(nn.Module):
         ]).sum(dim=0))
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
+    def __init__(self, repr_size, num_verbs, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
         self.human_idx = human_idx
-        self.obj_to_verb = obj_to_verb
 
         self.spatial_head = nn.Sequential(
             nn.Linear(36, 128), nn.ReLU(),
@@ -369,13 +368,12 @@ class UPT(nn.Module):
         Maximum number of instances (human or object) to sample
     """
     def __init__(self,
-        detector: nn.Module,
-        postprocessor: nn.Module,
-        interaction_head: nn.Module,
-        human_idx: int, num_verbs: int, num_triplets: int,
-        repr_size: int = 384,
+        detector: nn.Module, postprocessor: nn.Module,
+        triplet_decoder: nn.Module, obj_to_triplet: list,
+        num_verbs: int, num_triplets: int,
+        repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
-        box_score_thresh: float = 0.2, fg_iou_thresh: float = 0.5,
+        box_score_thresh: float = 0.2,
         min_instances: int = 3, max_instances: int = 15,
     ) -> None:
         super().__init__()
@@ -385,40 +383,27 @@ class UPT(nn.Module):
         self.bbox_embed = detector.bbox_embed
         self.input_proj = detector.input_proj
         self.query_embed = detector.query_embed
-
         self.postprocessor = postprocessor
+
         self.ho_matcher = HumanObjectMatcher(
             repr_size=repr_size,
             num_verbs=num_verbs,
-            obj_to_verb=None,
             human_idx=human_idx
         )
         self.vb_matcher = VerbMatcher(
             repr_size=repr_size,
-            obj_to_triplet=None,
+            obj_to_triplet=obj_to_triplet,
         )
-        decoder_layer = TransformerDecoderLayer(
-            q_size=repr_size,
-            kv_size=self.query_embed.shape[1],
-            num_heads=8
-        )
-        self.decoder = TransformerDecoder(
-            decoder_layer=decoder_layer,
-            num_layers=4
-        )
+        self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, 1)
 
+        self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
         self.num_triplets = num_triplets
-        self.repr_size = repr_size
-
         self.alpha = alpha
         self.gamma = gamma
-
         self.box_score_thresh = box_score_thresh
-        self.fg_iou_thresh = fg_iou_thresh
-
         self.min_instances = min_instances
         self.max_instances = max_instances
 
@@ -576,24 +561,29 @@ class UPT(nn.Module):
         )
         return detections
 
-def build_detector(args, class_corr):
+def build_detector(args, obj_to_triplet):
     detr, _, postprocessors = build_model(args)
     if os.path.exists(args.pretrained):
         if dist.get_rank() == 0:
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
-    predictor = torch.nn.Linear(args.repr_dim * 2, args.num_classes)
-    interaction_head = InteractionHead(
-        predictor, args.hidden_dim, args.repr_dim,
-        detr.backbone[0].num_channels,
-        args.num_classes, args.human_idx, class_corr
+
+    decoder_layer = TransformerDecoderLayer(
+        q_size=args.repr_dim, kv_size=args.hidden_dim,
+        num_heads=args.nheads, dropout=args.dropout
+    )
+    triplet_decoder = TransformerDecoder(
+        decoder_layer=decoder_layer,
+        num_layers=args.triplet_dec_layers
     )
     detector = UPT(
-        detr, postprocessors['bbox'], interaction_head,
-        human_idx=args.human_idx, num_classes=args.num_classes,
+        detr, postprocessors['bbox'],
+        triplet_decoder, obj_to_triplet,
+        num_verbs=args.num_verbs,
+        num_triplets=args.num_triplets,
+        repr_size=args.repr_dim,
         alpha=args.alpha, gamma=args.gamma,
         box_score_thresh=args.box_score_thresh,
-        fg_iou_thresh=args.fg_iou_thresh,
         min_instances=args.min_instances,
         max_instances=args.max_instances,
     )

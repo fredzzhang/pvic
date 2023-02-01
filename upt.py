@@ -152,7 +152,7 @@ class VerbMatcher(nn.Module):
                 )
                 # Append matched human-verb-object triplets
                 mm_q_per_img.append(mm_q)
-                dup_inds_per_img.append(dup)
+                dup_inds_per_img.append(dup.long())
                 trip_inds_per_img.append(present_trip)
             mm_queries.append(torch.cat(mm_q_per_img))
             dup_indices.append(torch.cat(dup_inds_per_img))
@@ -187,11 +187,11 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = dropout
         self.ffn_interm_size = ffn_interm_size
 
-        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout, batch_first=True)
+        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
         self.qk_attn = nn.MultiheadAttention(
             q_size, num_heads,
             kdim=kv_size, vdim=kv_size,
-            dropout=dropout, batch_first=True
+            dropout=dropout
         )
         self.ffn = nn.Sequential(
             nn.Linear(q_size, ffn_interm_size),
@@ -547,19 +547,26 @@ class UPT(nn.Module):
         if triplet_cands is None:
             triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
         mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
-        padded_queries, q_padding_mask = pad_queries(mm_queries)
+        # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
-        padded_queries = self.decoder(
-            padded_queries, memory,
-            q_padding_mask=q_padding_mask,
-            kv_padding_mask=mask,
-            kv_pos=pos[-1]
-        )[0]
-        mm_queries_collate = torch.cat([
-            mm_q[q_p_m] for mm_q, q_p_m
-            in zip(padded_queries, q_padding_mask)
-        ])
-        logits = self.binary_classifier(mm_queries_collate)
+        output_queries = []
+        b, c, h, w = memory.shape
+        memory = memory.permute(0, 2, 3, 1).reshape(b, h * w, c)
+        kv_p_m = mask.reshape(-1, 1, h * w)
+        kv_pos = pos[-1].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        for i, (mm_q, mem) in enumerate(zip(mm_queries, memory)):
+            output_queries.append(self.decoder(
+                mm_q.unsqueeze(1), mem.unsqueeze(1),
+                # q_padding_mask=q_padding_mask,
+                kv_padding_mask=kv_p_m[i],
+                kv_pos=kv_pos[i]
+            )[0].reshape(-1, self.repr_size))
+        mm_queries_collate = torch.cat(output_queries)
+        # mm_queries_collate = torch.cat([
+        #     mm_q[q_p_m] for mm_q, q_p_m
+        #     in zip(padded_queries, q_padding_mask)
+        # ])
+        logits = self.binary_classifier(mm_queries_collate).squeeze(1)
         prior_collate = torch.cat([
             p[d] for p, d in zip(prior_scores, dup_inds)
         ])
@@ -585,7 +592,9 @@ class UPT(nn.Module):
 def build_detector(args, obj_to_triplet):
     detr, _, postprocessors = build_model(args)
     if os.path.exists(args.pretrained):
-        if dist.get_rank() == 0:
+        if dist.is_initialized():
+            print(f"Rank {dist.get_rank()}: Load weights for the object detector from {args.pretrained}")
+        else:
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 

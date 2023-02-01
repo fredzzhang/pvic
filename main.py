@@ -41,8 +41,14 @@ def main(rank, args):
 
     torch.cuda.set_device(rank)
 
-    trainset = DataFactory(name=args.dataset, partition=args.partitions[0], data_root=args.data_root)
-    testset = DataFactory(name=args.dataset, partition=args.partitions[1], data_root=args.data_root)
+    trainset = DataFactory(
+        name=args.dataset, partition=args.partitions[0],
+        data_root=args.data_root, k=args.k
+    )
+    testset = DataFactory(
+        name=args.dataset, partition=args.partitions[1],
+        data_root=args.data_root, k=args.k
+    )
 
     train_loader = DataLoader(
         dataset=trainset,
@@ -159,6 +165,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--triplet-dec-layers', default=4, type=int)
     parser.add_argument('--triplet-embeds', required=True, type=str)
+    parser.add_argument('--k', default=50, type=int)
 
     parser.add_argument('--no-aux-loss', dest='aux_loss', action='store_false')
     parser.add_argument('--set-cost-class', default=1, type=float)

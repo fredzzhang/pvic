@@ -24,6 +24,8 @@ import pocket
 from pocket.core import DistributedLearningEngine
 from pocket.utils import DetectionAPMeter, BoxPairAssociation
 
+from ops import recover_boxes
+
 import sys
 sys.path.append('detr')
 import datasets.transforms as T
@@ -97,12 +99,13 @@ class DataFactory(Dataset):
     def __getitem__(self, i):
         image, target = self.dataset[i]
         if self.name == 'hicodet':
-            target['labels'] = target['verb']
+            target['labels'] = target['hoi']
             # Convert ground truth boxes to zero-based index and the
             # representation from pixel indices to coordinates
             target['boxes_h'][:, :2] -= 1
             target['boxes_o'][:, :2] -= 1
         else:
+            # TODO Potentially change labels to triplet class
             target['labels'] = target['actions']
             target['object'] = target.pop('objects')
 
@@ -126,16 +129,15 @@ class CacheTemplate(defaultdict):
             return [0., 0., .1, .1, 0.]
 
 class CustomisedDLE(DistributedLearningEngine):
-    def __init__(self, net, train_dataloader, test_dataloader, max_norm=0, num_classes=117, **kwargs):
+    def __init__(self, net, train_dataloader, test_dataloader, max_norm=0, **kwargs):
         super().__init__(net, None, train_dataloader, **kwargs)
         self.max_norm = max_norm
-        self.num_classes = num_classes
         self.test_dataloader = test_dataloader
 
     def _on_each_iteration(self):
         loss_dict = self._state.net(
             *self._state.inputs, targets=self._state.targets)
-        if loss_dict['interaction_loss'].isnan():
+        if loss_dict['cls_loss'].isnan():
             raise ValueError(f"The HOI loss is NaN for rank {self._rank}")
 
         self._state.loss = sum(loss for loss in loss_dict.values())
@@ -166,9 +168,6 @@ class CustomisedDLE(DistributedLearningEngine):
 
         dataset = dataloader.dataset.dataset
         associate = BoxPairAssociation(min_iou=0.5)
-        conversion = torch.from_numpy(np.asarray(
-            dataset.object_n_verb_to_interaction, dtype=float
-        ))
 
         if self._rank == 0:
             meter = DetectionAPMeter(
@@ -185,14 +184,12 @@ class CustomisedDLE(DistributedLearningEngine):
             for output, target in zip(outputs, targets):
                 # Format detections
                 boxes = output['boxes']
-                boxes_h, boxes_o = boxes[output['pairing']].unbind(0)
-                objects = output['objects']
+                boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
                 scores = output['scores']
-                verbs = output['labels']
-                interactions = conversion[objects, verbs]
+                interactions = output['labels']
                 # Recover target box scale
-                gt_bx_h = net.module.recover_boxes(target['boxes_h'], target['size'])
-                gt_bx_o = net.module.recover_boxes(target['boxes_o'], target['size'])
+                gt_bx_h = recover_boxes(target['boxes_h'], target['size'])
+                gt_bx_o = recover_boxes(target['boxes_o'], target['size'])
 
                 # Associate detected pairs with ground truth pairs
                 labels = torch.zeros_like(scores)
@@ -236,9 +233,6 @@ class CustomisedDLE(DistributedLearningEngine):
         net.eval()
 
         dataset = dataloader.dataset.dataset
-        conversion = torch.from_numpy(np.asarray(
-            dataset.object_n_verb_to_interaction, dtype=float
-        ))
         object2int = dataset.object_to_interaction
 
         # Include empty images when counting
@@ -260,11 +254,9 @@ class CustomisedDLE(DistributedLearningEngine):
             image_idx = dataset._idx[i]
             # Format detections
             boxes = output['boxes']
-            boxes_h, boxes_o = boxes[output['pairing']].unbind(0)
-            objects = output['objects']
+            boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
             scores = output['scores']
-            verbs = output['labels']
-            interactions = conversion[objects, verbs]
+            interactions = output['labels']
             # Rescale the boxes to original image size
             ow, oh = dataset.image_size(i)
             h, w = output['size']

@@ -32,14 +32,16 @@ import datasets.transforms as T
 
 def custom_collate(batch):
     images = []
+    triplet_cands = []
     targets = []
-    for im, tar in batch:
+    for im, t_cands, tar in batch:
         images.append(im)
+        triplet_cands.append(t_cands)
         targets.append(tar)
-    return images, targets
+    return images, triplet_cands, targets
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root):
+    def __init__(self, name, partition, data_root, k=50):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -47,10 +49,11 @@ class DataFactory(Dataset):
             assert partition in ['train2015', 'test2015'], \
                 "Unknown HICO-DET partition " + partition
             self.dataset = HICODet(
-                root=os.path.join(data_root, 'hico_20160224_det/images', partition),
-                anno_file=os.path.join(data_root, 'instances_{}.json'.format(partition)),
+                root=os.path.join(data_root, "hico_20160224_det/images", partition),
+                anno_file=os.path.join(data_root, f"instances_{partition}.json"),
                 target_transform=pocket.ops.ToTensor(input_format='dict')
             )
+            self.triplet_cands = torch.load(os.path.join(data_root, f"top_100_triplets_{partition}.pt"))
         else:
             assert partition in ['train', 'val', 'trainval', 'test'], \
                 "Unknown V-COCO partition " + partition
@@ -62,9 +65,10 @@ class DataFactory(Dataset):
             )
             self.dataset = VCOCO(
                 root=os.path.join(data_root, image_dir[partition]),
-                anno_file=os.path.join(data_root, 'instances_vcoco_{}.json'.format(partition)
-                ), target_transform=pocket.ops.ToTensor(input_format='dict')
+                anno_file=os.path.join(data_root, f"instances_vcoco_{partition}.json"),
+                target_transform=pocket.ops.ToTensor(input_format='dict')
             )
+            # TODO potentially add triplet candidates here
 
         # Prepare dataset transforms
         normalize = T.Compose([
@@ -92,12 +96,14 @@ class DataFactory(Dataset):
             ])
 
         self.name = name
+        self.k = k
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, i):
         image, target = self.dataset[i]
+        triplet_cands = self.triplet_cands[i, :self.k]
         if self.name == 'hicodet':
             target['labels'] = target['hoi']
             # Convert ground truth boxes to zero-based index and the
@@ -111,7 +117,7 @@ class DataFactory(Dataset):
 
         image, target = self.transforms(image, target)
 
-        return image, target
+        return image, triplet_cands, target
 
 class CacheTemplate(defaultdict):
     """A template for VCOCO cached results """
@@ -175,8 +181,8 @@ class CustomisedDLE(DistributedLearningEngine):
                 num_gt=dataset.anno_interaction,
             )
         for batch in tqdm(dataloader, disable=(self._world_size != 1)):
-            inputs = pocket.ops.relocate_to_cuda(batch[0])
-            outputs = net(inputs)
+            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
+            outputs = net(*inputs)
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
             targets = batch[-1]
 
@@ -240,8 +246,8 @@ class CustomisedDLE(DistributedLearningEngine):
         all_results = np.empty((600, nimages), dtype=object)
 
         for i, batch in enumerate(tqdm(dataloader)):
-            inputs = pocket.ops.relocate_to_cuda(batch[0])
-            output = net(inputs)
+            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
+            output = net(*inputs)
 
             # Skip images without detections
             if output is None or len(output) == 0:

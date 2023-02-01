@@ -151,6 +151,8 @@ class VerbMatcher(nn.Module):
             for i, o in enumerate(objs):
                 trip = self.obj_to_triplet[o.item()]
                 present_trip = [t for t in trip if t in t_cands]
+                if len(present_trip) == 0:
+                    continue
                 dup = torch.ones(len(present_trip), device=device) * i
                 # Construct multi-modal queries
                 mm_q = self.mbf(
@@ -161,6 +163,13 @@ class VerbMatcher(nn.Module):
                 mm_q_per_img.append(mm_q)
                 dup_inds_per_img.append(dup.long())
                 trip_inds_per_img.append(present_trip)
+            # Handle images when all ho pairs are filtered out
+            if len(mm_q_per_img) == 0:
+                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
+                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
+                triplet_indices.append([])
+                continue
+
             mm_queries.append(torch.cat(mm_q_per_img))
             dup_indices.append(torch.cat(dup_inds_per_img))
             triplet_indices.append(trip_inds_per_img)

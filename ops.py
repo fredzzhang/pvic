@@ -430,7 +430,7 @@ def prepare_region_proposals(
 def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_classes, thresh=0.5):
     labels = []
     for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
-        is_match = torch.zeros(len(paired_inds), num_classes, device=bx.device)
+        is_match = torch.zeros(len(p_inds), num_classes, device=bx.device)
 
         bx_h, bx_o = bx[p_inds].unbind(1)
         gt_bx_h = recover_boxes(target["boxes_h"], target["size"])
@@ -447,7 +447,7 @@ def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_c
     return torch.cat(labels)
 
 def recover_boxes(boxes, size):
-    boxes = box_ops.box_cxcywh_to_xyxy(boxes)
+    boxes = box_cxcywh_to_xyxy(boxes)
     h, w = size
     scale_fct = torch.stack([w, h, w, h])
     boxes = boxes * scale_fct

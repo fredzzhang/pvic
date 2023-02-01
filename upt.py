@@ -138,6 +138,13 @@ class VerbMatcher(nn.Module):
         dup_indices = []
         triplet_indices = []
         for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
+            # Handle images without valid ho pairs
+            if len(ho_q) == 0:
+                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
+                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
+                triplet_indices.append([])
+                continue
+
             mm_q_per_img = []
             dup_inds_per_img = []
             trip_inds_per_img = []
@@ -468,7 +475,11 @@ class UPT(nn.Module):
         ):
             pr = pr.prod(1)
             scores = lg.sigmoid() * pr
-            pred = torch.cat([torch.as_tensor(p, device=scores.device) for p in pred])
+            # Handle images without ho pairs
+            if len(dp_inds) == 0:
+                pred = torch.zeros(0, device=bx.device, dtype=torch.long)
+            else:
+                pred = torch.cat([torch.as_tensor(p, device=scores.device) for p in pred])
             detections.append(dict(
                 boxes=bx, pairing=dp_inds, scores=scores,
                 labels=pred, objects=objs, size=size

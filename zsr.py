@@ -75,6 +75,7 @@ def main(args):
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size,
         num_workers=args.num_workers, pin_memory=use_cuda,
+        shuffle=False
     )
 
     with open("hicodet/prompts.json", "r") as f:
@@ -87,7 +88,10 @@ def main(args):
         eval_zs_recognition(dataloader, model, text_features, device)
     if args.rec:
         eval_zs_recall(dataloader, model, text_features, device)
+    if args.top_k:
+        find_top_k_triplets(dataloader, model, text_features, device)
 
+@torch.no_grad()
 def eval_zs_recognition(dataloader, model, class_embeddings, device):
     """Evaluate the zero-shot interaction recognition mAP"""
     ap = pocket.utils.AveragePrecisionMeter()
@@ -106,6 +110,7 @@ def eval_zs_recognition(dataloader, model, class_embeddings, device):
         f" none-rare: {ap[dataloader.dataset.non_rare].mean():.4f}"
     )
 
+@torch.no_grad()
 def eval_zs_recall(dataloader, model, class_embeddings, device):
     """Evaluate the recall from top k interactions with varying k"""
     full = torch.zeros(1, 600)
@@ -176,6 +181,20 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
     with open(f"nuniqobj_{len(nuniqobj_all)}.json", "w") as f:
         json.dump(nuniqobj_all, f)
 
+@torch.no_grad()
+def find_top_k_triplets(dataloader, model, class_embeddings, device, k=100):
+    """Extract the top-k triplets"""
+    top_k_t = []
+    for images, _ in tqdm(dataloader):
+        image_features = model.encode_image(images.to(device))
+        image_features /= image_features.norm(dim=1, keepdim=True)
+
+        cos = image_features @ class_embeddings.t()
+        rank = cos.argsort(dim=1, descending=True).cpu()
+        top_k_t.append(rank[:, :k])
+    top_k_t = torch.cat(top_k_t)
+    torch.save(top_k_t, f"top_k_triplets_{len(top_k_t)}.pt")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", "-dr", type=str, default="hicodet")
@@ -185,5 +204,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", "-nw", type=int, default=8)
     parser.add_argument("--map", action="store_true", default=False)
     parser.add_argument("--rec", action="store_true", default=False)
+    parser.add_argument("--top-k", action="store_true", default=False)
     args = parser.parse_args()
     main(args)

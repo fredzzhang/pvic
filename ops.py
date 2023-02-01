@@ -430,6 +430,11 @@ def prepare_region_proposals(
 def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_classes, thresh=0.5):
     labels = []
     for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
+        # Handle images without ho pairs
+        if len(p_inds) == 0:
+            labels.append(torch.zeros(0, device=bx.device))
+            continue
+
         is_match = torch.zeros(len(p_inds), num_classes, device=bx.device)
 
         bx_h, bx_o = bx[p_inds].unbind(1)

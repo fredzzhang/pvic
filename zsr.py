@@ -108,9 +108,9 @@ def eval_zs_recognition(dataloader, model, class_embeddings, device):
 
 def eval_zs_recall(dataloader, model, class_embeddings, device):
     """Evaluate the recall from top k interactions with varying k"""
-    rec = torch.zeros(6, 600)
     full = torch.zeros(1, 600)
-    nuniqobj = torch.zeros(6, 2)
+    rec = torch.zeros(8, 600)
+    nuniqobj = torch.zeros(8, 2)
     nuniqobj_all = []
     intr2obj = torch.as_tensor(dataloader.dataset.class_corr)[:, 1]
     for images, targets in tqdm(dataloader):
@@ -121,7 +121,7 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
         rank = cos.argsort(dim=1, descending=True).cpu()
         i, j = torch.nonzero(targets).unbind(1)
         # Record the number of unique object types from the top-k triplets
-        selection = rank[:, :50]
+        selection = rank[:, :150]
         obj_list = intr2obj[selection].unbind(0)
         for objs in obj_list:
             nuniqobj[0, 0] += objs[:3].unique().numel()
@@ -129,19 +129,23 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
             nuniqobj[2, 0] += objs[:10].unique().numel()
             nuniqobj[3, 0] += objs[:15].unique().numel()
             nuniqobj[4, 0] += objs[:25].unique().numel()
-            nuniqobj[5, 0] += objs.unique().numel()
+            nuniqobj[5, 0] += objs[:50].unique().numel()
+            nuniqobj[6, 0] += objs[:100].unique().numel()
+            nuniqobj[7, 0] += objs.unique().numel()
             nuniqobj_all.append(objs.unique().numel())
         nuniqobj[:, 1] += len(obj_list)
         # Duplicate the rank once for each ground truth instance
         ref = rank[i]
-        isin = torch.eq(ref[:, :50], j.unsqueeze(1))
+        isin = torch.eq(ref[:, :150], j.unsqueeze(1))
         isin3 = isin[:, :3].sum(1)
         isin5 = isin[:, :5].sum(1)
         isin10 = isin[:, :10].sum(1)
         isin15 = isin[:, :20].sum(1)
         isin25 = isin[:, :25].sum(1)
-        isin50 = isin.sum(1)
-        isin_ = torch.stack([isin3, isin5, isin10, isin15, isin25, isin50], dim=0)
+        isin50 = isin[:, :50].sum(1)
+        isin100 = isin[:, :100].sum(1)
+        isin150 = isin.sum(1)
+        isin_ = torch.stack([isin3, isin5, isin10, isin15, isin25, isin50, isin100, isin150], dim=0)
         # Aggregate results for each ground truth instance
         for n, t in enumerate(j):
             rec[:, t] += isin_[:, n]
@@ -163,6 +167,10 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
         f"non-rare: {rec[4, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[4]:.2f}.\n"
         f"k=50,\tfull: {rec[5].mean():.4f}, rare: {rec[5, dataloader.dataset.rare].mean():.4f}, "
         f"non-rare: {rec[5, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[5]:.2f}.\n"
+        f"k=100,\tfull: {rec[6].mean():.4f}, rare: {rec[6, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[6, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[6]:.2f}.\n"
+        f"k=150,\tfull: {rec[7].mean():.4f}, rare: {rec[7, dataloader.dataset.rare].mean():.4f}, "
+        f"non-rare: {rec[7, dataloader.dataset.non_rare].mean():.4f}, avg.#uniq. objs.: {nuniqobj[7]:.2f}.\n"
     )
 
     with open(f"nuniqobj_{len(nuniqobj_all)}.json", "w") as f:

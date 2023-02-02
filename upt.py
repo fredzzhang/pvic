@@ -22,6 +22,7 @@ from ops import (
     compute_spatial_encodings,
     prepare_region_proposals,
     associate_with_ground_truth,
+    compute_prior_scores,
     pad_queries
 )
 
@@ -60,11 +61,12 @@ class MultiBranchFusion(nn.Module):
         ]).sum(dim=0))
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, human_idx=0):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
         self.human_idx = human_idx
+        self.obj_to_verb = obj_to_verb
 
         self.spatial_head = nn.Sequential(
             nn.Linear(36, 128), nn.ReLU(),
@@ -102,7 +104,7 @@ class HumanObjectMatcher(nn.Module):
             if len(x_keep) == 0:
                 ho_queries.append(torch.zeros(0, self.repr_size, device=device))
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
-                prior_scores.append(torch.zeros(0, 2, device=device))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
                 continue
             # Compute spatial features
@@ -118,7 +120,10 @@ class HumanObjectMatcher(nn.Module):
             # Append matched human-object pairs
             ho_queries.append(ho_q)
             paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
-            prior_scores.append(torch.stack([scores[x_keep], scores[y_keep]], dim=1))
+            prior_scores.append(compute_prior_scores(
+                x_keep, y_keep, scores, labels, self.num_verbs, self.training,
+                self.obj_to_verb
+            ))
             object_types.append(labels[y_keep])
 
         return ho_queries, paired_indices, prior_scores, object_types
@@ -390,8 +395,9 @@ class UPT(nn.Module):
         detector: nn.Module,
         postprocessor: nn.Module,
         triplet_decoder: nn.Module,
-        triplet_embeds: Tensor,
-        obj_to_triplet: list,
+        # triplet_embeds: Tensor,
+        # obj_to_triplet: list,
+        obj_to_verb: list,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
@@ -410,15 +416,16 @@ class UPT(nn.Module):
         self.ho_matcher = HumanObjectMatcher(
             repr_size=repr_size,
             num_verbs=num_verbs,
-            human_idx=human_idx
+            obj_to_verb=obj_to_verb,
+            human_idx=human_idx,
         )
-        self.vb_matcher = VerbMatcher(
-            repr_size=repr_size,
-            obj_to_triplet=obj_to_triplet,
-            triplet_embeds=triplet_embeds
-        )
+        # self.vb_matcher = VerbMatcher(
+        #     repr_size=repr_size,
+        #     obj_to_triplet=obj_to_triplet,
+        #     triplet_embeds=triplet_embeds
+        # )
         self.decoder = triplet_decoder
-        self.binary_classifier = nn.Linear(repr_size, 1)
+        self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
         self.repr_size = repr_size
         self.human_idx = human_idx
@@ -445,6 +452,12 @@ class UPT(nn.Module):
             p.requires_grad = False
 
     def compute_classification_loss(self, logits, prior, labels):
+        prior = torch.cat(prior, dim=0).prod(1)
+        x, y = torch.nonzero(prior).unbind(1)
+
+        logits = logits[x, y]
+        prior = prior[x, y]
+        labels = labels[x, y]
 
         n_p = labels.sum()
         if dist.is_initialized():
@@ -454,7 +467,6 @@ class UPT(nn.Module):
             dist.all_reduce(n_p)
             n_p = (n_p / world_size).item()
 
-        prior = prior.prod(1)
         loss = binary_focal_loss_with_logits(
             torch.log(
                 prior / (1 + torch.exp(-logits) - prior) + 1e-8
@@ -465,36 +477,23 @@ class UPT(nn.Module):
         return loss / n_p
 
     def postprocessing(self,
-            boxes, paired_inds, dup_inds,
-            triplet_inds, object_types,
+            boxes, paired_inds, object_types,
             logits, prior, image_sizes
         ):
-        n = []
-        dup_paired_inds = []
-        dup_object_types = []
-        for p_inds, d_inds,objs in zip(paired_inds, dup_inds, object_types):
-            dup_paired_inds.append(p_inds[d_inds])
-            dup_object_types.append(objs[d_inds])
-            n.append(len(d_inds))
-
+        n = [len(p_inds) for p_inds in paired_inds]
         logits = logits.split(n)
-        prior = prior.split(n)
 
         detections = []
-        for bx, dp_inds, pred, objs, lg, pr, size in zip(
-            boxes, dup_paired_inds, triplet_inds, dup_object_types,
+        for bx, p_inds, objs, lg, pr, size in zip(
+            boxes, paired_inds, object_types,
             logits, prior, image_sizes
         ):
             pr = pr.prod(1)
-            scores = lg.sigmoid() * pr
-            # Handle images without ho pairs
-            if len(dp_inds) == 0:
-                pred = torch.zeros(0, device=bx.device, dtype=torch.long)
-            else:
-                pred = torch.cat([torch.as_tensor(p, device=scores.device) for p in pred])
+            x, y = torch.nonzero(pr).unbind(1)
+            scores = lg[x, y].sigmoid() * pr[x, y]
             detections.append(dict(
-                boxes=bx, pairing=dp_inds, scores=scores,
-                labels=pred, objects=objs, size=size
+                boxes=bx, pairing=p_inds[x], scores=scores,
+                labels=y, objects=objs[x], size=size
             ))
 
         return detections
@@ -567,10 +566,10 @@ class UPT(nn.Module):
         boxes = [r['boxes'] for r in region_props]
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
-        if triplet_cands is None:
+        # if triplet_cands is None:
             # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
-            triplet_cands = [None for _ in range(len(boxes))]
-        mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
+            # triplet_cands = [None for _ in range(len(boxes))]
+        # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
         output_queries = []
@@ -578,9 +577,9 @@ class UPT(nn.Module):
         memory = memory.permute(0, 2, 3, 1).reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
         kv_pos = pos[-1].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
-        for i, (mm_q, mem) in enumerate(zip(mm_queries, memory)):
+        for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
             output_queries.append(self.decoder(
-                mm_q.unsqueeze(1), mem.unsqueeze(1),
+                ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
                 kv_pos=kv_pos[i]
@@ -590,26 +589,21 @@ class UPT(nn.Module):
         #     mm_q[q_p_m] for mm_q, q_p_m
         #     in zip(padded_queries, q_padding_mask)
         # ])
-        logits = self.binary_classifier(mm_queries_collate).squeeze(1)
-        prior_collate = torch.cat([
-            p[d] for p, d in zip(prior_scores, dup_inds)
-        ])
+        logits = self.binary_classifier(mm_queries_collate)
 
         if self.training:
             labels = associate_with_ground_truth(
-                boxes, paired_inds, triplet_inds,
-                targets, self.num_triplets
+                boxes, paired_inds, targets, self.num_verbs
             )
-            cls_loss = self.compute_classification_loss(logits, prior_collate, labels)
+            cls_loss = self.compute_classification_loss(logits, prior_scores, labels)
             loss_dict = dict(
                 cls_loss=cls_loss
             )
             return loss_dict
 
         detections = self.postprocessing(
-            boxes, paired_inds, dup_inds,
-            triplet_inds, object_types,
-            logits, prior_collate, image_sizes
+            boxes, paired_inds, object_types,
+            logits, prior_scores, image_sizes
         )
         return detections
 
@@ -622,10 +616,10 @@ def build_detector(args, obj_to_triplet):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
-    if os.path.exists(args.triplet_embeds):
-        triplet_embeds = torch.load(args.triplet_embeds)
-    else:
-        raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
+    # if os.path.exists(args.triplet_embeds):
+    #     triplet_embeds = torch.load(args.triplet_embeds)
+    # else:
+    #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
     decoder_layer = TransformerDecoderLayer(
         q_size=args.repr_dim, kv_size=args.hidden_dim,
@@ -638,8 +632,8 @@ def build_detector(args, obj_to_triplet):
     )
     detector = UPT(
         detr, postprocessors['bbox'],
-        triplet_decoder, triplet_embeds,
-        obj_to_triplet,
+        triplet_decoder,
+        obj_to_verb=obj_to_triplet,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,
         repr_size=args.repr_dim,

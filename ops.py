@@ -431,7 +431,7 @@ def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_c
     labels = []
     for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
         # Handle images without ho pairs
-        if len(p_inds) == 0:
+        if len(t_inds) == 0:
             labels.append(torch.zeros(0, device=bx.device))
             continue
 

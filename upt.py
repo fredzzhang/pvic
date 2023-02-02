@@ -625,6 +625,7 @@ def build_detector(args, obj_to_triplet):
 
     decoder_layer = TransformerDecoderLayer(
         q_size=args.repr_dim, kv_size=args.hidden_dim,
+        ffn_interm_size=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
     )
     triplet_decoder = TransformerDecoder(

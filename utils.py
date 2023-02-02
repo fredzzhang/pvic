@@ -34,7 +34,7 @@ def custom_collate(batch):
     images = []
     # triplet_cands = []
     targets = []
-    for im, t_cands, tar in batch:
+    for im, tar in batch:
         images.append(im)
         # triplet_cands.append(t_cands)
         targets.append(tar)

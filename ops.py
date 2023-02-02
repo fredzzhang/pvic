@@ -427,14 +427,9 @@ def prepare_region_proposals(
 
     return region_props
 
-def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_classes, thresh=0.5):
+def associate_with_ground_truth(boxes, paired_inds, targets, num_classes, thresh=0.5):
     labels = []
-    for bx, p_inds, t_inds, target in zip(boxes, paired_inds, triplet_inds, targets):
-        # Handle images without ho pairs
-        if len(t_inds) == 0:
-            labels.append(torch.zeros(0, device=bx.device))
-            continue
-
+    for bx, p_inds, target in zip(boxes, paired_inds, targets):
         is_match = torch.zeros(len(p_inds), num_classes, device=bx.device)
 
         bx_h, bx_o = bx[p_inds].unbind(1)
@@ -447,8 +442,7 @@ def associate_with_ground_truth(boxes, paired_inds, triplet_inds, targets, num_c
         ) >= thresh).unbind(1)
         is_match[x, target["labels"][y]] = 1
 
-        lab_per_img = torch.cat([is_match[i, t] for i, t in enumerate(t_inds)])
-        labels.append(lab_per_img)
+        labels.append(is_match)
     return torch.cat(labels)
 
 def recover_boxes(boxes, size):
@@ -510,7 +504,7 @@ def compute_prior_scores(
     prior_h[pair_idx, flat_target_idx] = s_h[pair_idx]
     prior_o[pair_idx, flat_target_idx] = s_o[pair_idx]
 
-    return torch.stack([prior_h, prior_o])
+    return torch.stack([prior_h, prior_o], dim=1)
 
 def compute_spatial_encodings(
     boxes_1: List[Tensor], boxes_2: List[Tensor],

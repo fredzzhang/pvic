@@ -70,7 +70,7 @@ def main(rank, args):
     )
 
     if args.dataset == 'hicodet':
-        object_to_target = train_loader.dataset.dataset.object_to_interaction
+        object_to_target = np.asarray(train_loader.dataset.dataset.class_corr)[:, 1].tolist()
         args.num_verbs = 117
         args.num_triplets = 600
     elif args.dataset == 'vcoco':

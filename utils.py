@@ -32,13 +32,13 @@ import datasets.transforms as T
 
 def custom_collate(batch):
     images = []
-    triplet_cands = []
+    # triplet_cands = []
     targets = []
     for im, t_cands, tar in batch:
         images.append(im)
-        triplet_cands.append(t_cands)
+        # triplet_cands.append(t_cands)
         targets.append(tar)
-    return images, triplet_cands, targets
+    return images, targets
 
 class DataFactory(Dataset):
     def __init__(self, name, partition, data_root, k=50):
@@ -103,7 +103,7 @@ class DataFactory(Dataset):
 
     def __getitem__(self, i):
         image, target = self.dataset[i]
-        triplet_cands = self.triplet_cands[i, :self.k]
+        # triplet_cands = self.triplet_cands[i, :self.k]
         if self.name == 'hicodet':
             target['labels'] = target['hoi']
             # Convert ground truth boxes to zero-based index and the
@@ -117,7 +117,7 @@ class DataFactory(Dataset):
 
         image, target = self.transforms(image, target)
 
-        return image, triplet_cands, target
+        return image, target
 
 class CacheTemplate(defaultdict):
     """A template for VCOCO cached results """

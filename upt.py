@@ -150,7 +150,10 @@ class VerbMatcher(nn.Module):
             trip_inds_per_img = []
             for i, o in enumerate(objs):
                 trip = self.obj_to_triplet[o.item()]
-                present_trip = [t for t in trip if t in t_cands]
+                if t_cands is None:
+                    present_trip = trip
+                else:
+                    present_trip = [t for t in trip if t in t_cands]
                 if len(present_trip) == 0:
                     continue
                 dup = torch.ones(len(present_trip), device=device) * i
@@ -565,7 +568,8 @@ class UPT(nn.Module):
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
         if triplet_cands is None:
-            triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
+            # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
+            triplet_cands = [None for _ in range(len(boxes))]
         mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 

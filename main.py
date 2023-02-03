@@ -120,7 +120,7 @@ def main(rank, args):
     upt.freeze_detector()
     param_dicts = [{"params": [p for p in upt.parameters() if p.requires_grad]}]
     optim = torch.optim.AdamW(param_dicts, lr=args.lr_head, weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_drop)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_drop, gamma=args.lr_drop_factor)
     # Override optimiser and learning rate scheduler
     engine.update_state_key(optimizer=optim, lr_scheduler=lr_scheduler)
 
@@ -147,6 +147,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight-decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr-drop', default=10, type=int)
+    parser.add_argument('--lr-drop-factor', default=0.1, type=float)
     parser.add_argument('--clip-max-norm', default=0.1, type=float)
 
     parser.add_argument('--backbone', default='resnet50', type=str)

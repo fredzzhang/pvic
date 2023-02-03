@@ -144,17 +144,19 @@ class VerbMatcher(nn.Module):
             for t in t_cands:
                 obj_to_triplet[self.triplet_to_obj[t.item()]].append(t.item())
             # Retrieve matched triplets and indices for duplicating ho pairs
-            dup_inds, t_inds = torch.as_tensor([
+            matched_vb = torch.as_tensor([
                 (i, t) for i, o in enumerate(objs)
-                for t in obj_to_triplet(o)
-            ], device=device).unbind(1)
+                for t in obj_to_triplet[o.item()]
+            ], device=device)
 
             # Handle images without valid ho pairs
-            if len(dup_inds) == 0:
+            if len(matched_vb) == 0:
                 mm_queries.append(torch.zeros(0, self.repr_size, device=device))
                 dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
                 triplet_indices.append(torch.zeros(0, device=device, dtype=torch.long))
                 continue
+
+            dup_inds, t_inds = matched_vb.unbind(1)
 
             mm_queries.append(self.mbf(
                 ho_q[dup_inds], self.triplet_embeds[t_inds]

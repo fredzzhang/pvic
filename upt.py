@@ -382,7 +382,7 @@ class UPT(nn.Module):
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
-        box_score_thresh: float = 0.2,
+        box_score_thresh: float = 0.2, exp: float = 0.424,
         min_instances: int = 3, max_instances: int = 15,
     ) -> None:
         super().__init__()
@@ -407,6 +407,9 @@ class UPT(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, 1)
 
+        if exp < 0 or exp > 0.5:
+            raise ValueError(f"The exponent on the object detection scores should be between 0 and 0.5.")
+
         self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
@@ -414,6 +417,7 @@ class UPT(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.box_score_thresh = box_score_thresh
+        self.exp = exp
         self.min_instances = min_instances
         self.max_instances = max_instances
 
@@ -473,7 +477,7 @@ class UPT(nn.Module):
             logits, prior, image_sizes
         ):
             pr = pr.prod(1)
-            scores = lg.sigmoid() * pr
+            scores = lg.sigmoid().pow(1 - self.exp * 2) * pr.pow(self.exp)
             detections.append(dict(
                 boxes=bx, pairing=dp_inds, scores=scores,
                 labels=pred, objects=objs, size=size

@@ -70,7 +70,7 @@ def main(rank, args):
     )
 
     if args.dataset == 'hicodet':
-        object_to_target = train_loader.dataset.dataset.object_to_interaction
+        object_to_target = np.asarray(train_loader.dataset.dataset.class_corr)[:, 1].tolist()
         args.num_verbs = 117
         args.num_triplets = 600
     elif args.dataset == 'vcoco':
@@ -131,13 +131,13 @@ def sanity_check(args):
     dataset = DataFactory(name='hicodet', partition=args.partitions[0], data_root=args.data_root)
     args.num_verbs = 117
     args.num_triplets = 600
-    object_to_target = dataset.dataset.object_to_interaction
-    upt = build_detector(args, object_to_target)
+    triplet_to_obj = np.asarray(dataset.dataset.class_corr)[:, 1].tolist()
+    upt = build_detector(args, triplet_to_obj)
     if args.eval:
         upt.eval()
 
-    image, target = dataset[0]
-    outputs = upt([image], targets=[target])
+    image, trip_cands, target = dataset[0]
+    outputs = upt([image], [trip_cands], targets=[target])
 
 if __name__ == '__main__':
     

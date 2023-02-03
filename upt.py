@@ -124,10 +124,11 @@ class HumanObjectMatcher(nn.Module):
         return ho_queries, paired_indices, prior_scores, object_types
 
 class VerbMatcher(nn.Module):
-    def __init__(self, repr_size, obj_to_triplet, triplet_embeds):
+    def __init__(self, repr_size, triplet_to_obj, triplet_embeds, num_objs=80):
         super().__init__()
         self.repr_size = repr_size
-        self.obj_to_triplet = obj_to_triplet
+        self.triplet_to_obj = triplet_to_obj
+        self.num_objs = num_objs
         self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
 
         self.mbf = MultiBranchFusion(repr_size, triplet_embeds.shape[1], repr_size, cardinality=8)
@@ -138,41 +139,30 @@ class VerbMatcher(nn.Module):
         dup_indices = []
         triplet_indices = []
         for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
+            obj_to_triplet = [[] for _ in range(self.num_objs)]
+            # Create an object-to-triplet mapping from the candidates
+            for t in t_cands:
+                obj_to_triplet[self.triplet_to_obj[t.item()]].append(t.item())
+            # Retrieve matched triplets and indices for duplicating ho pairs
+            matched_vb = torch.as_tensor([
+                (i, t) for i, o in enumerate(objs)
+                for t in obj_to_triplet[o.item()]
+            ], device=device)
+
             # Handle images without valid ho pairs
-            if len(ho_q) == 0:
+            if len(matched_vb) == 0:
                 mm_queries.append(torch.zeros(0, self.repr_size, device=device))
                 dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                triplet_indices.append([])
+                triplet_indices.append(torch.zeros(0, device=device, dtype=torch.long))
                 continue
 
-            mm_q_per_img = []
-            dup_inds_per_img = []
-            trip_inds_per_img = []
-            for i, o in enumerate(objs):
-                trip = self.obj_to_triplet[o.item()]
-                present_trip = [t for t in trip if t in t_cands]
-                if len(present_trip) == 0:
-                    continue
-                dup = torch.ones(len(present_trip), device=device) * i
-                # Construct multi-modal queries
-                mm_q = self.mbf(
-                    ho_q[i: i+1].repeat(len(dup), 1),
-                    torch.stack([self.triplet_embeds[t] for t in present_trip])
-                )
-                # Append matched human-verb-object triplets
-                mm_q_per_img.append(mm_q)
-                dup_inds_per_img.append(dup.long())
-                trip_inds_per_img.append(present_trip)
-            # Handle images when all ho pairs are filtered out
-            if len(mm_q_per_img) == 0:
-                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
-                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                triplet_indices.append([])
-                continue
+            dup_inds, t_inds = matched_vb.unbind(1)
 
-            mm_queries.append(torch.cat(mm_q_per_img))
-            dup_indices.append(torch.cat(dup_inds_per_img))
-            triplet_indices.append(trip_inds_per_img)
+            mm_queries.append(self.mbf(
+                ho_q[dup_inds], self.triplet_embeds[t_inds]
+            ))
+            dup_indices.append(dup_inds)
+            triplet_indices.append(t_inds)
 
         return mm_queries, dup_indices, triplet_indices
 
@@ -388,7 +378,7 @@ class UPT(nn.Module):
         postprocessor: nn.Module,
         triplet_decoder: nn.Module,
         triplet_embeds: Tensor,
-        obj_to_triplet: list,
+        triplet_to_obj: list,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
@@ -411,7 +401,7 @@ class UPT(nn.Module):
         )
         self.vb_matcher = VerbMatcher(
             repr_size=repr_size,
-            obj_to_triplet=obj_to_triplet,
+            triplet_to_obj=triplet_to_obj,
             triplet_embeds=triplet_embeds
         )
         self.decoder = triplet_decoder
@@ -484,11 +474,6 @@ class UPT(nn.Module):
         ):
             pr = pr.prod(1)
             scores = lg.sigmoid() * pr
-            # Handle images without ho pairs
-            if len(dp_inds) == 0:
-                pred = torch.zeros(0, device=bx.device, dtype=torch.long)
-            else:
-                pred = torch.cat([torch.as_tensor(p, device=scores.device) for p in pred])
             detections.append(dict(
                 boxes=bx, pairing=dp_inds, scores=scores,
                 labels=pred, objects=objs, size=size
@@ -593,7 +578,7 @@ class UPT(nn.Module):
 
         if self.training:
             labels = associate_with_ground_truth(
-                boxes, paired_inds, triplet_inds,
+                boxes, paired_inds, dup_inds, triplet_inds,
                 targets, self.num_triplets
             )
             cls_loss = self.compute_classification_loss(logits, prior_collate, labels)
@@ -609,7 +594,7 @@ class UPT(nn.Module):
         )
         return detections
 
-def build_detector(args, obj_to_triplet):
+def build_detector(args, triplet_to_obj):
     detr, _, postprocessors = build_model(args)
     if os.path.exists(args.pretrained):
         if dist.is_initialized():
@@ -635,7 +620,7 @@ def build_detector(args, obj_to_triplet):
     detector = UPT(
         detr, postprocessors['bbox'],
         triplet_decoder, triplet_embeds,
-        obj_to_triplet,
+        triplet_to_obj,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,
         repr_size=args.repr_dim,

@@ -554,7 +554,7 @@ class UPT(nn.Module):
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
         if triplet_cands is None:
-            triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
+            triplet_cands = [torch.arange(self.num_triplets) for _ in range(len(boxes))]
         mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 

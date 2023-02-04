@@ -150,6 +150,7 @@ class CustomisedDLE(DistributedLearningEngine):
 
     def _on_start(self):
         if self._rank == 0:
+            self.best_perf = 0
             wandb.init(config=self.config)
             wandb.watch(self._state.net)
             wandb.define_metric("epochs")
@@ -205,24 +206,37 @@ class CustomisedDLE(DistributedLearningEngine):
         self._state.running_loss.reset()
 
     def _on_end_epoch(self):
-        super()._on_end_epoch()
         ap = self.test_hico()
         if self._rank == 0:
             # Fetch indices for rare and non-rare classes
             rare = self.test_dataloader.dataset.dataset.rare
             non_rare = self.test_dataloader.dataset.dataset.non_rare
+            perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
             print(
                 f"Epoch {self._state.epoch} =>\t"
-                f"mAP: {ap.mean():.4f},"
-                f" rare: {ap[rare].mean():.4f},"
-                f" none-rare: {ap[non_rare].mean():.4f}"
+                f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
             )
             wandb.log({
-                "epochs": self._state.epoch,
-                "mAP full": ap.mean().item(),
-                "mAP rare": ap[rare].mean().item(),
-                "mAP non_rare": ap[non_rare].mean().item()
+                "epochs": self._state.epoch, "mAP full": perf[0],
+                "mAP rare": perf[1], "mAP non_rare": perf[2]
             })
+            # Save checkpoints
+            checkpoint = {
+                'iteration': self._state.iteration,
+                'epoch': self._state.epoch,
+                'performance': perf,
+                'model_state_dict': self._state.net.module.state_dict(),
+                'optim_state_dict': self._state.optimizer.state_dict(),
+                'scaler_state_dict': self._state.scaler.state_dict()
+            }
+            if self._state.lr_scheduler is not None:
+                checkpoint['scheduler_state_dict'] = self._state.lr_scheduler.state_dict()
+            torch.save(checkpoint, os.path.join(self._cache_dir, "latest.pth"))
+            if perf[0] > self.best_perf:
+                self.best_perf = perf[0]
+                torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
+        if self._state.lr_scheduler is not None:
+            self._state.lr_scheduler.step()
 
     @torch.no_grad()
     def test_hico(self):

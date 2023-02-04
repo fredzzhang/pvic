@@ -153,13 +153,13 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.init(config=self.config)
             wandb.watch(self._state.net)
             wandb.define_metric("epochs")
-            wandb.define_metric("mAP full", step_metric="epochs")
-            wandb.define_metric("mAP rare", step_metric="epochs")
-            wandb.define_metric("mAP non_rare", step_metric="epochs")
+            wandb.define_metric("mAP full", step_metric="epochs", summary="max")
+            wandb.define_metric("mAP rare", step_metric="epochs", summary="max")
+            wandb.define_metric("mAP non_rare", step_metric="epochs", summary="max")
 
-            wandb.define_metric("elapsed_time")
-            wandb.define_metric("training_steps", step_metric="elapsed_time")
-            wandb.define_metric("loss", step_metric="training_steps")
+            wandb.define_metric("training_steps")
+            wandb.define_metric("elapsed_time", step_metric="training_steps", summary="max")
+            wandb.define_metric("loss", step_metric="training_steps", summary="min")
 
     def _on_end(self):
         if self._rank == 0:

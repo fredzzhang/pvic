@@ -182,7 +182,7 @@ def eval_zs_recall(dataloader, model, class_embeddings, device):
         json.dump(nuniqobj_all, f)
 
 @torch.no_grad()
-def find_top_k_triplets(dataloader, model, class_embeddings, device, k=100):
+def find_top_k_triplets(dataloader, model, class_embeddings, device, k=600):
     """Extract the top-k triplets"""
     top_k_t = []
     for images, _ in tqdm(dataloader):

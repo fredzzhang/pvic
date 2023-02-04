@@ -157,8 +157,8 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.define_metric("mAP rare", step_metric="epochs")
             wandb.define_metric("mAP non_rare", step_metric="epochs")
 
-            wandb.define_metric("time")
-            wandb.define_metric("training_steps", step_metric="time")
+            wandb.define_metric("elapsed_time")
+            wandb.define_metric("training_steps", step_metric="elapsed_time")
             wandb.define_metric("loss", step_metric="training_steps")
 
     def _on_end(self):
@@ -196,7 +196,7 @@ class CustomisedDLE(DistributedLearningEngine):
                 num_iter, running_loss, t_data, t_iter
             ))
             wandb.log({
-                "time": time.strftime('%H:%M:%S'),
+                "elapsed_time": (time.time() - self._dawn) / 3600,
                 "training_steps": self._state.iteration,
                 "loss": running_loss
             })

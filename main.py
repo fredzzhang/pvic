@@ -87,13 +87,7 @@ def main(rank, args):
     else:
         print(f"=> Rank {rank}: start from a randomly initialised model")
 
-    engine = CustomisedDLE(
-        upt, train_loader, test_loader,
-        max_norm=args.clip_max_norm,
-        print_interval=args.print_interval,
-        find_unused_parameters=True,
-        cache_dir=args.output_dir
-    )
+    engine = CustomisedDLE(upt, train_loader, test_loader, args)
 
     if args.cache:
         if args.dataset == 'hicodet':
@@ -184,15 +178,17 @@ if __name__ == '__main__':
     parser.add_argument('--partitions', nargs='+', default=['train2015', 'test2015'], type=str)
     parser.add_argument('--num-workers', default=2, type=int)
     parser.add_argument('--data-root', default='./hicodet')
+    parser.add_argument('--output-dir', default='checkpoints')
+    parser.add_argument('--pretrained', default='', help='Path to a pretrained detector')
+    parser.add_argument('--resume', default='', help='Resume from a model')
+
+    parser.add_argument('--use-wandb', default=False, action='store_true')
 
     # training parameters
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--port', default='1234', type=str)
     parser.add_argument('--seed', default=66, type=int)
-    parser.add_argument('--pretrained', default='', help='Path to a pretrained detector')
-    parser.add_argument('--resume', default='', help='Resume from a model')
-    parser.add_argument('--output-dir', default='checkpoints')
     parser.add_argument('--print-interval', default=100, type=int)
     parser.add_argument('--world-size', default=8, type=int)
     parser.add_argument('--eval', action='store_true')
@@ -209,6 +205,8 @@ if __name__ == '__main__':
     if args.sanity:
         sanity_check(args)
         sys.exit()
+    if not args.use_wandb:
+        os.environ["WANDB_MODE"] = "disabled"
 
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = args.port

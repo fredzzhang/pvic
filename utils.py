@@ -8,7 +8,9 @@ Microsoft Research Asia
 """
 
 import os
+import time
 import torch
+import wandb
 import pickle
 import numpy as np
 import scipy.io as sio
@@ -135,10 +137,33 @@ class CacheTemplate(defaultdict):
             return [0., 0., .1, .1, 0.]
 
 class CustomisedDLE(DistributedLearningEngine):
-    def __init__(self, net, train_dataloader, test_dataloader, max_norm=0, **kwargs):
-        super().__init__(net, None, train_dataloader, **kwargs)
-        self.max_norm = max_norm
+    def __init__(self, net, train_dataloader, test_dataloader, config):
+        super().__init__(
+            net, None, train_dataloader,
+            print_interval=config.print_interval,
+            cache_dir=config.output_dir,
+            find_unused_parameters=True
+        )
+        self.config = config
+        self.max_norm = config.clip_max_norm
         self.test_dataloader = test_dataloader
+
+    def _on_start(self):
+        if self._rank == 0:
+            wandb.init(config=self.config)
+            wandb.watch(self._state.net)
+            wandb.define_metric("epochs")
+            wandb.define_metric("mAP full", step_metric="epochs")
+            wandb.define_metric("mAP rare", step_metric="epochs")
+            wandb.define_metric("mAP non_rare", step_metric="epochs")
+
+            wandb.define_metric("time")
+            wandb.define_metric("training_steps", step_metric="time")
+            wandb.define_metric("loss", step_metric="training_steps")
+
+    def _on_end(self):
+        if self._rank == 0:
+            wandb.finish()
 
     def _on_each_iteration(self):
         loss_dict = self._state.net(
@@ -153,6 +178,32 @@ class CustomisedDLE(DistributedLearningEngine):
             torch.nn.utils.clip_grad_norm_(self._state.net.parameters(), self.max_norm)
         self._state.optimizer.step()
 
+    def _print_statistics(self):
+        running_loss = self._state.running_loss.mean()
+        t_data = self._state.t_data.sum() / self._world_size
+        t_iter = self._state.t_iteration.sum() / self._world_size
+
+        # Print stats in the master process
+        if self._rank == 0:
+            num_iter = len(self._train_loader)
+            n_d = len(str(num_iter))
+            print(
+                "Epoch [{}/{}], Iter. [{}/{}], "
+                "Loss: {:.4f}, "
+                "Time[Data/Iter.]: [{:.2f}s/{:.2f}s]".format(
+                self._state.epoch, self.epochs,
+                str(self._state.iteration - num_iter * (self._state.epoch - 1)).zfill(n_d),
+                num_iter, running_loss, t_data, t_iter
+            ))
+            wandb.log({
+                "time": time.strftime('%H:%M:%S'),
+                "training_steps": self._state.iteration,
+                "loss": running_loss.item()
+            })
+        self._state.t_iteration.reset()
+        self._state.t_data.reset()
+        self._state.running_loss.reset()
+
     def _on_end_epoch(self):
         super()._on_end_epoch()
         ap = self.test_hico()
@@ -166,6 +217,12 @@ class CustomisedDLE(DistributedLearningEngine):
                 f" rare: {ap[rare].mean():.4f},"
                 f" none-rare: {ap[non_rare].mean():.4f}"
             )
+            wandb.log({
+                "epochs": self._state.epoch,
+                "mAP full": ap.mean().item(),
+                "mAP rare": ap[rare].mean().item(),
+                "mAP non_rare": ap[non_rare].mean().item()
+            })
 
     @torch.no_grad()
     def test_hico(self):

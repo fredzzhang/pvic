@@ -55,7 +55,7 @@ class DataFactory(Dataset):
                 anno_file=os.path.join(data_root, f"instances_{partition}.json"),
                 target_transform=pocket.ops.ToTensor(input_format='dict')
             )
-            self.triplet_cands = torch.load(os.path.join(data_root, f"top_100_triplets_{partition}.pt"))
+            self.triplet_cands = torch.load(os.path.join(data_root, f"triplet_ranking_{partition}.pt"))
         else:
             assert partition in ['train', 'val', 'trainval', 'test'], \
                 "Unknown V-COCO partition " + partition

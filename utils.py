@@ -152,7 +152,7 @@ class CustomisedDLE(DistributedLearningEngine):
         if self._rank == 0:
             self.best_perf = 0
             wandb.init(config=self.config)
-            wandb.watch(self._state.net)
+            wandb.watch(self._state.net.module)
             wandb.define_metric("epochs")
             wandb.define_metric("mAP full", step_metric="epochs", summary="max")
             wandb.define_metric("mAP rare", step_metric="epochs", summary="max")

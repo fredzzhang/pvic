@@ -198,7 +198,7 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.log({
                 "time": time.strftime('%H:%M:%S'),
                 "training_steps": self._state.iteration,
-                "loss": running_loss.item()
+                "loss": running_loss
             })
         self._state.t_iteration.reset()
         self._state.t_data.reset()

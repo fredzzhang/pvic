@@ -1,4 +1,6 @@
 .DS_Store
+.amltignore
+checkpoints
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

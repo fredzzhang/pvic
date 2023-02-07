@@ -34,13 +34,13 @@ import datasets.transforms as T
 
 def custom_collate(batch):
     images = []
-    triplet_cands = []
+    # triplet_cands = []
     targets = []
-    for im, t_cands, tar in batch:
+    for im, tar in batch:
         images.append(im)
-        triplet_cands.append(t_cands)
+        # triplet_cands.append(t_cands)
         targets.append(tar)
-    return images, triplet_cands, targets
+    return images, targets
 
 class DataFactory(Dataset):
     def __init__(self, name, partition, data_root, k=50):
@@ -105,9 +105,9 @@ class DataFactory(Dataset):
 
     def __getitem__(self, i):
         image, target = self.dataset[i]
-        triplet_cands = self.triplet_cands[i, :self.k]
+        # triplet_cands = self.triplet_cands[i, :self.k]
         if self.name == 'hicodet':
-            target['labels'] = target['hoi']
+            target['labels'] = target['verb']
             # Convert ground truth boxes to zero-based index and the
             # representation from pixel indices to coordinates
             target['boxes_h'][:, :2] -= 1
@@ -119,7 +119,7 @@ class DataFactory(Dataset):
 
         image, target = self.transforms(image, target)
 
-        return image, triplet_cands, target
+        return image, target
 
 class CacheTemplate(defaultdict):
     """A template for VCOCO cached results """
@@ -245,6 +245,9 @@ class CustomisedDLE(DistributedLearningEngine):
 
         dataset = dataloader.dataset.dataset
         associate = BoxPairAssociation(min_iou=0.5)
+        conversion = torch.from_numpy(np.asarray(
+            dataset.object_n_verb_to_interaction, dtype=float
+        ))
 
         if self._rank == 0:
             meter = DetectionAPMeter(
@@ -263,7 +266,9 @@ class CustomisedDLE(DistributedLearningEngine):
                 boxes = output['boxes']
                 boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
                 scores = output['scores']
-                interactions = output['labels']
+                verbs = output['labels']
+                objects = output['objects']
+                interactions = conversion[objects, verbs]
                 # Recover target box scale
                 gt_bx_h = recover_boxes(target['boxes_h'], target['size'])
                 gt_bx_o = recover_boxes(target['boxes_o'], target['size'])
@@ -310,6 +315,9 @@ class CustomisedDLE(DistributedLearningEngine):
         net.eval()
 
         dataset = dataloader.dataset.dataset
+        conversion = torch.from_numpy(np.asarray(
+            dataset.object_n_verb_to_interaction, dtype=float
+        ))
         object2int = dataset.object_to_interaction
 
         # Include empty images when counting
@@ -332,8 +340,10 @@ class CustomisedDLE(DistributedLearningEngine):
             # Format detections
             boxes = output['boxes']
             boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
+            objects = output['objects']
             scores = output['scores']
-            interactions = output['labels']
+            verbs = output['labels']
+            interactions = conversion[objects, verbs]
             # Rescale the boxes to original image size
             ow, oh = dataset.image_size(i)
             h, w = output['size']

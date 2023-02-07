@@ -130,8 +130,8 @@ def sanity_check(args):
     if args.eval:
         upt.eval()
 
-    image, trip_cands, target = dataset[0]
-    outputs = upt([image], [trip_cands], targets=[target])
+    image, target = dataset[0]
+    outputs = upt([image], targets=[target])
 
 if __name__ == '__main__':
     

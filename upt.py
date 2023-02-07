@@ -388,7 +388,7 @@ class UPT(nn.Module):
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
-        box_score_thresh: float = 0.2, exp: float = 0.424,
+        box_score_thresh: float = 0.2,
         min_instances: int = 3, max_instances: int = 15,
     ) -> None:
         super().__init__()
@@ -406,11 +406,6 @@ class UPT(nn.Module):
             obj_to_verb=obj_to_verb,
             human_idx=human_idx,
         )
-        # self.vb_matcher = VerbMatcher(
-        #     repr_size=repr_size,
-        #     obj_to_triplet=obj_to_triplet,
-        #     triplet_embeds=triplet_embeds
-        # )
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 

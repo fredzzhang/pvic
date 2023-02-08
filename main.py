@@ -159,7 +159,7 @@ if __name__ == '__main__':
     parser.add_argument('--pre-norm', action='store_true')
 
     parser.add_argument('--triplet-dec-layers', default=4, type=int)
-    parser.add_argument('--triplet-embeds', required=True, type=str)
+    parser.add_argument('--triplet-embeds', default="", type=str)
     parser.add_argument('--k', default=50, type=int)
 
     parser.add_argument('--no-aux-loss', dest='aux_loss', action='store_false')

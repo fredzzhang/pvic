@@ -45,7 +45,7 @@ class MultiModalFusion(nn.Module):
         for d_in, d_out in zip(repr_size[:-1], repr_size[1:]):
             mlp.append(nn.Linear(d_in, d_out))
             mlp.append(nn.ReLU())
-        self.mlp = nn.Sequential(mlp)
+        self.mlp = nn.Sequential(*mlp)
 
     def forward(self, x: Tensor, y: Tensor) -> Tensor:
         x = self.ln1(self.fc1(x))

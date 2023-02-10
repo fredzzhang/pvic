@@ -32,33 +32,27 @@ from models import build_model
 from util.misc import nested_tensor_from_tensor_list
 
 
-class MultiBranchFusion(nn.Module):
-    def __init__(self, fst_mod_size, scd_mod_size, repr_size, cardinality):
+class MultiModalFusion(nn.Module):
+    def __init__(self, fst_mod_size, scd_mod_size, repr_size):
         super().__init__()
-        self.cardinality = cardinality
+        self.fc1 = nn.Linear(fst_mod_size, repr_size)
+        self.fc2 = nn.Linear(scd_mod_size, repr_size)
+        self.ln1 = nn.LayerNorm(repr_size)
+        self.ln2 = nn.LayerNorm(repr_size)
 
-        sub_repr_size = int(repr_size / cardinality)
-        assert sub_repr_size * cardinality == repr_size, \
-            "The given representation size should be divisible by cardinality."
+        mlp = []
+        repr_size = [2 * repr_size, int(repr_size * 1.5), repr_size]
+        for d_in, d_out in zip(repr_size[:-1], repr_size[1:]):
+            mlp.append(nn.Linear(d_in, d_out))
+            mlp.append(nn.ReLU())
+        self.mlp = nn.Sequential(mlp)
 
-        self.fc_1 = nn.ModuleList([
-            nn.Linear(fst_mod_size, sub_repr_size)
-            for _ in range(cardinality)
-        ])
-        self.fc_2 = nn.ModuleList([
-            nn.Linear(scd_mod_size, sub_repr_size)
-            for _ in range(cardinality)
-        ])
-        self.fc_3 = nn.ModuleList([
-            nn.Linear(sub_repr_size, repr_size)
-            for _ in range(cardinality)
-        ])
-    def forward(self, fst_mod: Tensor, scd_mod: Tensor) -> Tensor:
-        return F.relu(torch.stack([
-            fc_3(F.relu(fc_1(fst_mod) * fc_2(scd_mod)))
-            for fc_1, fc_2, fc_3
-            in zip(self.fc_1, self.fc_2, self.fc_3)
-        ]).sum(dim=0))
+    def forward(self, x: Tensor, y: Tensor) -> Tensor:
+        x = self.ln1(self.fc1(x))
+        y = self.ln2(self.fc2(y))
+        z = F.relu(torch.cat([x, y], dim=-1))
+        z = self.mlp(z)
+        return z
 
 class HumanObjectMatcher(nn.Module):
     def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
@@ -73,7 +67,7 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(128, 256), nn.ReLU(),
             nn.Linear(256, repr_size), nn.ReLU(),
         )
-        self.mbf = MultiBranchFusion(512, repr_size, repr_size, cardinality=8)
+        self.mbf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
@@ -136,7 +130,7 @@ class VerbMatcher(nn.Module):
         self.num_objs = num_objs
         self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
 
-        self.mbf = MultiBranchFusion(repr_size, triplet_embeds.shape[1], repr_size, cardinality=8)
+        self.mbf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
     def forward(self, ho_queries, object_types, triplet_cands):
         device = ho_queries[0].device
 

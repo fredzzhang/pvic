@@ -13,9 +13,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-
 from torch import nn, Tensor
 from typing import Optional, List
+from swint import SwinTransformerBlockV2
 
 from ops import (
     binary_focal_loss_with_logits,
@@ -165,49 +165,97 @@ class VerbMatcher(nn.Module):
 
         return mm_queries, dup_indices, triplet_indices
 
+class SwinTransformer(nn.Module):
+    def __init__(self, dim):
+        """
+        A feature stage consisting of a series of Swin Transformer V2 blocks.
+
+        Parameters:
+        -----------
+        dim: int
+            Dimension of the input features.
+        """
+        super().__init__()
+        self.dim = dim
+
+        self.depth = 6
+        self.num_heads = dim // 32
+        self.window_size = 8
+        self.base_sd_prob = 0.2
+
+        shift_size = [
+            [self.window_size // 2] * 2 if i % 2
+            else [0, 0] for i in range(self.depth)
+        ]
+        # 
+        sd_prob = (torch.linspace(0, 1, 12)[4:10] * self.base_sd_prob).tolist()
+
+        blocks: List[nn.Module] = []
+        for i in range(self.depth):
+            blocks.append(SwinTransformerBlockV2(
+                dim=dim, num_heads=self.num_heads,
+                window_size=[self.window_size] * 2,
+                shift_size=shift_size[i],
+                stochastic_depth_prob=sd_prob[i]
+            ))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x):
+        """
+        Parameters:
+        -----------
+        x: Tensor
+            Input features maps of shape (B, H, W, C).
+
+        Returns:
+        --------
+        Tensor
+            Output feature maps of shape (B, H, W, C).
+        """
+        return self.blocks(x)
+
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_size, kv_size, num_heads, ffn_interm_ratio=4, dropout=0.1):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
         """
         Transformer decoder layer, adapted from DETR codebase by Facebook Research
         https://github.com/facebookresearch/detr/blob/main/models/transformer.py#L187
 
         Parameters:
         -----------
-        q_size: int
+        q_dim: int
             Dimension of the interaction queries.
-        kv_size: int
+        kv_dim: int
             Dimension of the image features.
         num_heads: int
             Number of heads used in multihead attention.
-        ffn_interm_ratio: int, default: 4
-            The expansion ratio in the intermediate representation of the feedforward network.
+        ffn_interm_dim: int
+            Dimension of the intermediate representation in the feedforward network.
         dropout: float, default: 0.1
             Dropout percentage used during training.
         """
         super().__init__()
-        self.q_size = q_size
-        self.kv_size = kv_size
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim
         self.num_heads = num_heads
         self.dropout = dropout
-        self.ffn_interm_ratio = ffn_interm_ratio
+        self.ffn_interm_dim = ffn_interm_dim
 
-        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
+        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
         self.qk_attn = nn.MultiheadAttention(
-            q_size, num_heads,
-            kdim=kv_size, vdim=kv_size,
+            q_dim, num_heads,
+            kdim=kv_dim, vdim=kv_dim,
             dropout=dropout
         )
-        ffn_interm_size = q_size * ffn_interm_ratio
         self.ffn = nn.Sequential(
-            nn.Linear(q_size, ffn_interm_size),
+            nn.Linear(q_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_interm_size, q_size)
+            nn.Linear(ffn_interm_dim, q_dim)
         )
-        self.ln1 = nn.LayerNorm(q_size)
-        self.ln2 = nn.LayerNorm(q_size)
-        self.ln3 = nn.LayerNorm(q_size)
+        self.ln1 = nn.LayerNorm(q_dim)
+        self.ln2 = nn.LayerNorm(q_dim)
+        self.ln3 = nn.LayerNorm(q_dim)
         self.dp1 = nn.Dropout(dropout)
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
@@ -287,7 +335,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
         self.num_layers = num_layers
-        self.norm = nn.LayerNorm(decoder_layer.q_size)
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
         self.return_intermediate = return_intermediate
 
         self._reset_parameters()
@@ -599,8 +647,8 @@ def build_detector(args, obj_to_verb):
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
     decoder_layer = TransformerDecoderLayer(
-        q_size=args.repr_dim, kv_size=args.hidden_dim,
-        ffn_interm_size=args.repr_dim * 4,
+        q_dim=args.repr_dim, kv_dim=args.hidden_dim,
+        ffn_interm_dim=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
     )
     triplet_decoder = TransformerDecoder(

@@ -167,7 +167,7 @@ class VerbMatcher(nn.Module):
 
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_size, kv_size, num_heads, ffn_interm_size=2048, dropout=0.1):
+    def __init__(self, q_size, kv_size, num_heads, ffn_interm_ratio=4, dropout=0.1):
         """
         Transformer decoder layer, adapted from DETR codebase by Facebook Research
         https://github.com/facebookresearch/detr/blob/main/models/transformer.py#L187
@@ -180,8 +180,8 @@ class TransformerDecoderLayer(nn.Module):
             Dimension of the image features.
         num_heads: int
             Number of heads used in multihead attention.
-        ffn_interm_size: int, default: 2048
-            The intermediate size in the feedforward network.
+        ffn_interm_ratio: int, default: 4
+            The expansion ratio in the intermediate representation of the feedforward network.
         dropout: float, default: 0.1
             Dropout percentage used during training.
         """
@@ -190,7 +190,7 @@ class TransformerDecoderLayer(nn.Module):
         self.kv_size = kv_size
         self.num_heads = num_heads
         self.dropout = dropout
-        self.ffn_interm_size = ffn_interm_size
+        self.ffn_interm_ratio = ffn_interm_ratio
 
         self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
         self.qk_attn = nn.MultiheadAttention(
@@ -198,6 +198,7 @@ class TransformerDecoderLayer(nn.Module):
             kdim=kv_size, vdim=kv_size,
             dropout=dropout
         )
+        ffn_interm_size = q_size * ffn_interm_ratio
         self.ffn = nn.Sequential(
             nn.Linear(q_size, ffn_interm_size),
             nn.ReLU(),

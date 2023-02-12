@@ -216,26 +216,29 @@ class SwinTransformer(nn.Module):
         """
         return self.blocks(x)
 
-class FeatureHead(nn.Module):
+class Permute(nn.Module):
+    def __init__(self, dims: List[int]):
+        super().__init__()
+        self.dims = dims
+    def forward(self, x: Tensor) -> Tensor:
+        return x.permute(self.dims)
 
-    def __init__(self, dim, dim_backbone,):
+class FeatureHead(nn.Module):
+    def __init__(self, dim, dim_backbone):
         super().__init__()
         self.dim = dim
         self.dim_backbone = dim_backbone
 
         if dim != dim_backbone:
-            self.align = nn.Conv2d(dim_backbone, dim, 1)
+            align = nn.Conv2d(dim_backbone, dim, 1)
         else:
-            self.align = nn.Identity()
-        self.refine = nn.Conv2d(dim, dim, 3, padding=1)
-        self.swint = SwinTransformer(dim)
-
-    def forward(self, src, memory):
-        memory = T.resize(memory, src.shape[2:])
-        src = self.align(src)
-        output = self.refine(src + memory).permute(0, 2, 3, 1)
-        output = self.swint(output)
-        return output
+            align = nn.Identity()
+        self.layers = nn.Sequential(
+            align, Permute([0, 2, 3, 1]),
+            SwinTransformer(dim)
+        )
+    def forward(self, x):
+        return self.layers(x)
 
 class TransformerDecoderLayer(nn.Module):
 
@@ -625,7 +628,7 @@ class UPT(nn.Module):
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
         src, mask = features[self.fusion_layer].decompose()
-        memory = self.feature_head(src, memory)
+        memory = self.feature_head(src)
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)

@@ -624,7 +624,7 @@ class UPT(nn.Module):
         # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
-        src, mask = features[self.fusion_layer]
+        src, mask = features[self.fusion_layer].decompose()
         memory = self.feature_head(src, memory)
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
@@ -687,7 +687,7 @@ def build_detector(args, obj_to_verb):
     )
     factor = 2 ** (args.backbone_fusion_layer + 1)
     backbone_fusion_dim = int(factor * detr.backbone.num_channels)
-    feature_head = FeatureHead(args.repr_dim, backbone_fusion_dim)
+    feature_head = FeatureHead(args.hidden_dim, backbone_fusion_dim)
     detector = UPT(
         detr, postprocessors['bbox'],
         feature_head=feature_head,

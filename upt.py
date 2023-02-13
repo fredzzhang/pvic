@@ -12,10 +12,11 @@ import copy
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-
+import torchvision.transforms.functional as T
 
 from torch import nn, Tensor
 from typing import Optional, List
+from swint import SwinTransformerBlockV2
 
 from ops import (
     binary_focal_loss_with_logits,
@@ -165,48 +166,119 @@ class VerbMatcher(nn.Module):
 
         return mm_queries, dup_indices, triplet_indices
 
+class SwinTransformer(nn.Module):
+
+    def __init__(self, dim):
+        """
+        A feature stage consisting of a series of Swin Transformer V2 blocks.
+
+        Parameters:
+        -----------
+        dim: int
+            Dimension of the input features.
+        """
+        super().__init__()
+        self.dim = dim
+
+        self.depth = 6
+        self.num_heads = dim // 32
+        self.window_size = 8
+        self.base_sd_prob = 0.2
+
+        shift_size = [
+            [self.window_size // 2] * 2 if i % 2
+            else [0, 0] for i in range(self.depth)
+        ]
+        # Use stochastic depth parameters for the third stage of Swin-T variant.
+        sd_prob = (torch.linspace(0, 1, 12)[4:10] * self.base_sd_prob).tolist()
+
+        blocks: List[nn.Module] = []
+        for i in range(self.depth):
+            blocks.append(SwinTransformerBlockV2(
+                dim=dim, num_heads=self.num_heads,
+                window_size=[self.window_size] * 2,
+                shift_size=shift_size[i],
+                stochastic_depth_prob=sd_prob[i]
+            ))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x):
+        """
+        Parameters:
+        -----------
+        x: Tensor
+            Input features maps of shape (B, H, W, C).
+
+        Returns:
+        --------
+        Tensor
+            Output feature maps of shape (B, H, W, C).
+        """
+        return self.blocks(x)
+
+class FeatureHead(nn.Module):
+
+    def __init__(self, dim, dim_backbone,):
+        super().__init__()
+        self.dim = dim
+        self.dim_backbone = dim_backbone
+
+        if dim != dim_backbone:
+            self.align = nn.Conv2d(dim_backbone, dim, 1)
+        else:
+            self.align = nn.Identity()
+        self.refine = nn.Conv2d(dim, dim, 3, padding=1)
+        self.swint = SwinTransformer(dim)
+
+    def forward(self, src, memory):
+        memory = T.resize(memory, src.shape[2:])
+        src = self.align(src)
+        output = self.refine(src + memory).permute(0, 2, 3, 1)
+        output = self.swint(output)
+        return output
+
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_size, kv_size, num_heads, ffn_interm_size=2048, dropout=0.1):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
         """
         Transformer decoder layer, adapted from DETR codebase by Facebook Research
         https://github.com/facebookresearch/detr/blob/main/models/transformer.py#L187
 
         Parameters:
         -----------
-        q_size: int
+        q_dim: int
             Dimension of the interaction queries.
-        kv_size: int
+        kv_dim: int
             Dimension of the image features.
         num_heads: int
             Number of heads used in multihead attention.
-        ffn_interm_size: int, default: 2048
-            The intermediate size in the feedforward network.
+        ffn_interm_dim: int
+            Dimension of the intermediate representation in the feedforward network.
         dropout: float, default: 0.1
             Dropout percentage used during training.
         """
         super().__init__()
-        self.q_size = q_size
-        self.kv_size = kv_size
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim
         self.num_heads = num_heads
         self.dropout = dropout
-        self.ffn_interm_size = ffn_interm_size
+        self.ffn_interm_dim = ffn_interm_dim
 
-        self.q_attn = nn.MultiheadAttention(q_size, num_heads, dropout=dropout)
+        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
         self.qk_attn = nn.MultiheadAttention(
-            q_size, num_heads,
-            kdim=kv_size, vdim=kv_size,
+            q_dim, num_heads,
+            kdim=kv_dim, vdim=kv_dim,
             dropout=dropout
         )
         self.ffn = nn.Sequential(
-            nn.Linear(q_size, ffn_interm_size),
+            nn.Linear(q_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_interm_size, q_size)
+            nn.Linear(ffn_interm_dim, q_dim)
         )
-        self.ln1 = nn.LayerNorm(q_size)
-        self.ln2 = nn.LayerNorm(q_size)
-        self.ln3 = nn.LayerNorm(q_size)
+        self.ln1 = nn.LayerNorm(q_dim)
+        self.ln2 = nn.LayerNorm(q_dim)
+        self.ln3 = nn.LayerNorm(q_dim)
         self.dp1 = nn.Dropout(dropout)
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
@@ -286,7 +358,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
         self.num_layers = num_layers
-        self.norm = nn.LayerNorm(decoder_layer.q_size)
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
         self.return_intermediate = return_intermediate
 
         self._reset_parameters()
@@ -375,6 +447,8 @@ class UPT(nn.Module):
     def __init__(self,
         detector: nn.Module,
         postprocessor: nn.Module,
+        feature_head: nn.Module,
+        backbone_fusion_layer: int,
         triplet_decoder: nn.Module,
         # triplet_embeds: Tensor,
         # obj_to_triplet: list,
@@ -400,6 +474,8 @@ class UPT(nn.Module):
             obj_to_verb=obj_to_verb,
             human_idx=human_idx,
         )
+        self.feature_head = feature_head
+        self.fusion_layer = backbone_fusion_layer
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -548,11 +624,14 @@ class UPT(nn.Module):
         # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
-        output_queries = []
-        b, c, h, w = memory.shape
-        memory = memory.permute(0, 2, 3, 1).reshape(b, h * w, c)
+        src, mask = features[self.fusion_layer].decompose()
+        memory = self.feature_head(src, memory)
+        b, h, w, c = memory.shape
+        memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
-        kv_pos = pos[-1].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        kv_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+
+        output_queries = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
             output_queries.append(self.decoder(
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
@@ -598,17 +677,22 @@ def build_detector(args, obj_to_verb):
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
     decoder_layer = TransformerDecoderLayer(
-        q_size=args.repr_dim, kv_size=args.hidden_dim,
-        ffn_interm_size=args.repr_dim * 4,
+        q_dim=args.repr_dim, kv_dim=args.hidden_dim,
+        ffn_interm_dim=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
     )
     triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
     )
+    factor = 2 ** (args.backbone_fusion_layer + 1)
+    backbone_fusion_dim = int(factor * detr.backbone.num_channels)
+    feature_head = FeatureHead(args.hidden_dim, backbone_fusion_dim)
     detector = UPT(
         detr, postprocessors['bbox'],
-        triplet_decoder,
+        feature_head=feature_head,
+        backbone_fusion_layer=args.backbone_fusion_layer,
+        triplet_decoder=triplet_decoder,
         obj_to_verb=obj_to_verb,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,

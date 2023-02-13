@@ -404,9 +404,9 @@ class TransformerDecoder(nn.Module):
                 qk_attn_w.append(outputs[2])
 
         if self.return_intermediate:
-            return torch.stack(intermediate)
-
-        outputs = [self.norm(outputs[0]).unsqueeze(0),]
+            outputs = [torch.stack(intermediate),]
+        else:
+            outputs = [self.norm(outputs[0]).unsqueeze(0),]
         if return_q_attn_weights:
             q_attn_w = torch.stack(q_attn_w)
             outputs.append(q_attn_w)
@@ -507,9 +507,9 @@ class UPT(nn.Module):
         prior = torch.cat(prior, dim=0).prod(1)
         x, y = torch.nonzero(prior).unbind(1)
 
-        logits = logits[x, y]
+        logits = logits[:, x, y]
         prior = prior[x, y]
-        labels = labels[x, y]
+        labels = labels[None, x, y].repeat(len(logits), 1)
 
         n_p = labels.sum()
         if dist.is_initialized():
@@ -638,8 +638,8 @@ class UPT(nn.Module):
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
                 kv_pos=kv_pos[i]
-            )[0].reshape(-1, self.repr_size))
-        mm_queries_collate = torch.cat(output_queries)
+            )[0].squeeze(dim=2))
+        mm_queries_collate = torch.cat(output_queries, dim=1)
         # mm_queries_collate = torch.cat([
         #     mm_q[q_p_m] for mm_q, q_p_m
         #     in zip(padded_queries, q_padding_mask)
@@ -658,7 +658,7 @@ class UPT(nn.Module):
 
         detections = self.postprocessing(
             boxes, paired_inds, object_types,
-            logits, prior_scores, image_sizes
+            logits[-1], prior_scores, image_sizes
         )
         return detections
 
@@ -683,7 +683,8 @@ def build_detector(args, obj_to_verb):
     )
     triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
-        num_layers=args.triplet_dec_layers
+        num_layers=args.triplet_dec_layers,
+        return_intermediate=args.triplet_aux_loss
     )
     factor = 2 ** (args.backbone_fusion_layer + 1)
     backbone_fusion_dim = int(factor * detr.backbone.num_channels)

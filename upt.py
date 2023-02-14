@@ -12,11 +12,12 @@ import copy
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-import torchvision.transforms.functional as T
 
 from torch import nn, Tensor
 from typing import Optional, List
+from collections import OrderedDict
 from swint import SwinTransformerBlockV2
+from torchvision.ops import FeaturePyramidNetwork
 
 from ops import (
     binary_focal_loss_with_logits,
@@ -224,21 +225,30 @@ class Permute(nn.Module):
         return x.permute(self.dims)
 
 class FeatureHead(nn.Module):
-    def __init__(self, dim, dim_backbone):
+    def __init__(self, dim, dim_backbone, return_layer):
         super().__init__()
         self.dim = dim
         self.dim_backbone = dim_backbone
+        self.return_layer = return_layer
 
-        if dim != dim_backbone:
-            align = nn.Conv2d(dim_backbone, dim, 1)
-        else:
-            align = nn.Identity()
+        in_channel_list = [
+            int(dim_backbone * 2 ** i)
+            for i in range(return_layer + 1, 1)
+        ]
+        self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
         self.layers = nn.Sequential(
-            align, Permute([0, 2, 3, 1]),
+            Permute([0, 2, 3, 1]),
             SwinTransformer(dim)
         )
     def forward(self, x):
-        return self.layers(x)
+        pyramid = OrderedDict(
+            (f"{i}", x[i].tensors)
+            for i in range(self.return_layer, 0)
+        )
+        mask = x[self.return_layer].mask
+        x = self.fpn(pyramid)[f"{self.return_layer}"]
+        x = self.layers(x)
+        return x, mask
 
 class TransformerDecoderLayer(nn.Module):
 
@@ -627,8 +637,7 @@ class UPT(nn.Module):
         # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
         # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
-        src, mask = features[self.fusion_layer].decompose()
-        memory = self.feature_head(src)
+        memory, mask = self.feature_head(features)
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
@@ -689,9 +698,11 @@ def build_detector(args, obj_to_verb):
         num_layers=args.triplet_dec_layers,
         return_intermediate=args.triplet_aux_loss
     )
-    factor = 2 ** (args.backbone_fusion_layer + 1)
-    backbone_fusion_dim = int(factor * detr.backbone.num_channels)
-    feature_head = FeatureHead(args.hidden_dim, backbone_fusion_dim)
+    feature_head = FeatureHead(
+        args.hidden_dim,
+        detr.backbone.num_channels,
+        args.backbone_fusion_layer
+    )
     detector = UPT(
         detr, postprocessors['bbox'],
         feature_head=feature_head,

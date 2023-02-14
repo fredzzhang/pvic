@@ -353,8 +353,36 @@ class FeatureHead(nn.Module):
                 m._reset_parameters()
         normal_(self.level_embed)
 
-    def forward(self, x):
-        return 1
+    def forward(self, srcs, masks, pos_embeds):
+        # Prepare inputs for the encoder.
+        src_flatten = []
+        mask_flatten = []
+        lvl_pos_embed_flatten = []
+        spatial_shapes = []
+        for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+            bs, c, h, w = src.shape
+            spatial_shape = (h, w)
+            spatial_shapes.append(spatial_shape)
+            src = src.flatten(2).transpose(1, 2)
+            mask = mask.flatten(1)
+            pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            lvl_pos_embed_flatten.append(lvl_pos_embed)
+            src_flatten.append(src)
+            mask_flatten.append(mask)
+        src_flatten = torch.cat(src_flatten, 1)
+        mask_flatten = torch.cat(mask_flatten, 1)
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+
+        memory = self.encoder(
+            src_flatten, spatial_shapes, level_start_index,
+            valid_ratios, lvl_pos_embed_flatten, mask_flatten
+        )
+
+        return memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten
 
 class UPT(nn.Module):
     """
@@ -559,14 +587,6 @@ class UPT(nn.Module):
         boxes = [r['boxes'] for r in region_props]
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
-        
-        # Construct additional C6 (1/64) level.
-        feat_c6 = self.input_proj[-1](src)
-        mask_c6 = F.interpolate(
-            images.mask[None].float(),
-            size=feat_c6.shape[-2:]
-        ).to(torch.bool)[0]
-        pos_c6 = self.backbone[1](NestedTensor(feat_c6, mask_c6)).to(feat_c6.dtype)
 
         # Construct multiscale features.
         srcs = []
@@ -578,11 +598,21 @@ class UPT(nn.Module):
             src, mask = feat.decompose()
             srcs.append(self.input_proj[l-1](src))
             masks.append(mask)
+        # Construct additional C6 (1/64) level.
+        feat_c6 = self.input_proj[-1](features[-1].tensors)
+        mask_c6 = F.interpolate(
+            images.mask[None].float(),
+            size=feat_c6.shape[-2:]
+        ).to(torch.bool)[0]
+        pos_c6 = self.backbone[1](NestedTensor(feat_c6, mask_c6)).to(feat_c6.dtype)
         srcs.append(feat_c6)
         masks.append(mask_c6)
         pos.append(pos_c6)
 
-        # TODO transformer forward
+        # Compute keys/values for the decoder.
+        memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten = self.feature_head(srcs, masks, pos)
+
+        # TODO Decoder logic
 
         src, mask = features[self.fusion_layer].decompose()
         memory = self.feature_head(src)
@@ -636,12 +666,10 @@ def build_detector(args, obj_to_verb):
     # else:
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
-    decoder_layer = TransformerDecoderLayer(
-        q_dim=args.repr_dim, kv_dim=args.hidden_dim,
-        ffn_interm_dim=args.repr_dim * 4,
-        num_heads=args.nheads, dropout=args.dropout
+    decoder_layer = M.DeformableTransformerDecoderLayer(
+        d_model=args.repr_dim, d_ffn=args.repr_dim * 4
     )
-    triplet_decoder = TransformerDecoder(
+    triplet_decoder = M.DeformableTransformerDecoder(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers,
         return_intermediate=args.triplet_aux_loss

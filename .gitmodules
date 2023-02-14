@@ -11,5 +11,5 @@
 	path = detr
 	url = https://github.com/fredzzhang/detr.git
 [submodule "d-detr"]
-	path = d-detr
+	path = d_detr
 	url = https://github.com/fredzzhang/d-detr.git

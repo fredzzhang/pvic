@@ -8,18 +8,15 @@ Microsoft Research Asia
 """
 
 import os
+import copy
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 import torchvision.transforms.functional as T
 
 from torch import nn, Tensor
+from torch.nn.init import normal_
 from typing import Optional, List
-from transformers import (
-    TransformerDecoderLayer,
-    TransformerDecoder,
-    SwinTransformerBlockV2
-)
 
 from ops import (
     binary_focal_loss_with_logits,
@@ -30,10 +27,12 @@ from ops import (
     pad_queries
 )
 
+import d_detr.models.deformable_transformer as M
+
 import sys
 sys.path.append('detr')
 from models import build_model
-from util.misc import nested_tensor_from_tensor_list
+from util.misc import NestedTensor, nested_tensor_from_tensor_list
 
 
 class MultiModalFusion(nn.Module):
@@ -126,98 +125,183 @@ class HumanObjectMatcher(nn.Module):
 
         return ho_queries, paired_indices, prior_scores, object_types
 
-class VerbMatcher(nn.Module):
-    def __init__(self, repr_size, triplet_to_obj, triplet_embeds, num_objs=80):
-        super().__init__()
-        self.repr_size = repr_size
-        self.triplet_to_obj = triplet_to_obj
-        self.num_objs = num_objs
-        self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
+class TransformerDecoderLayer(nn.Module):
 
-        self.mbf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
-    def forward(self, ho_queries, object_types, triplet_cands):
-        device = ho_queries[0].device
-
-        mm_queries = []
-        dup_indices = []
-        triplet_indices = []
-        for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
-            obj_to_triplet = [[] for _ in range(self.num_objs)]
-            # Create an object-to-triplet mapping from the candidates
-            for t in t_cands:
-                obj_to_triplet[self.triplet_to_obj[t.item()]].append(t.item())
-            # Retrieve matched triplets and indices for duplicating ho pairs
-            matched_vb = torch.as_tensor([
-                (i, t) for i, o in enumerate(objs)
-                for t in obj_to_triplet[o.item()]
-            ], device=device)
-
-            # Handle images without valid ho pairs
-            if len(matched_vb) == 0:
-                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
-                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                triplet_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                continue
-
-            dup_inds, t_inds = matched_vb.unbind(1)
-
-            mm_queries.append(self.mbf(
-                ho_q[dup_inds], self.triplet_embeds[t_inds]
-            ))
-            dup_indices.append(dup_inds)
-            triplet_indices.append(t_inds)
-
-        return mm_queries, dup_indices, triplet_indices
-
-class SwinTransformer(nn.Module):
-
-    def __init__(self, dim):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
         """
-        A feature stage consisting of a series of Swin Transformer V2 blocks.
+        Transformer decoder layer, adapted from DETR codebase by Facebook Research
+        https://github.com/facebookresearch/detr/blob/main/models/transformer.py#L187
 
         Parameters:
         -----------
-        dim: int
-            Dimension of the input features.
+        q_dim: int
+            Dimension of the interaction queries.
+        kv_dim: int
+            Dimension of the image features.
+        num_heads: int
+            Number of heads used in multihead attention.
+        ffn_interm_dim: int
+            Dimension of the intermediate representation in the feedforward network.
+        dropout: float, default: 0.1
+            Dropout percentage used during training.
         """
         super().__init__()
-        self.dim = dim
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.ffn_interm_dim = ffn_interm_dim
 
-        self.depth = 6
-        self.num_heads = dim // 32
-        self.window_size = 8
-        self.base_sd_prob = 0.2
+        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
+        self.qk_attn = nn.MultiheadAttention(
+            q_dim, num_heads,
+            kdim=kv_dim, vdim=kv_dim,
+            dropout=dropout
+        )
+        self.ffn = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
+        )
+        self.ln1 = nn.LayerNorm(q_dim)
+        self.ln2 = nn.LayerNorm(q_dim)
+        self.ln3 = nn.LayerNorm(q_dim)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
+        self.dp3 = nn.Dropout(dropout)
 
-        shift_size = [
-            [self.window_size // 2] * 2 if i % 2
-            else [0, 0] for i in range(self.depth)
-        ]
-        # Use stochastic depth parameters for the third stage of Swin-T variant.
-        sd_prob = (torch.linspace(0, 1, 12)[4:10] * self.base_sd_prob).tolist()
+    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+        return tensor if pos is None else tensor + pos
 
-        blocks: List[nn.Module] = []
-        for i in range(self.depth):
-            blocks.append(SwinTransformerBlockV2(
-                dim=dim, num_heads=self.num_heads,
-                window_size=[self.window_size] * 2,
-                shift_size=shift_size[i],
-                stochastic_depth_prob=sd_prob[i]
-            ))
-        self.blocks = nn.Sequential(*blocks)
-
-    def forward(self, x):
+    def forward(self, queries, features,
+            q_mask: Optional[Tensor] = None,
+            kv_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+            q_pos: Optional[Tensor] = None,
+            kv_pos: Optional[Tensor] = None,
+            return_q_attn_weights: Optional[bool] = False,
+            return_qk_attn_weights: Optional[bool] = False
+        ):
         """
         Parameters:
         -----------
-        x: Tensor
-            Input features maps of shape (B, H, W, C).
+        queries: Tensor
+            Interaction queries of size (B, N, K).
+        features: Tensor
+            Image features of size (B, C, H, W).
+        q_mask: Tensor, default: None
+            Attention mask to be applied during the self attention of queries.
+        kv_mask: Tensor, default: None
+            Attention mask to be applied during the cross attention from image
+            features to interaction queries.
+        q_padding_mask: Tensor, default: None
+            Padding mask for interaction queries of size (B, N). Values of `True`
+            indicate the corresponding query was padded and to be ignored.
+        kv_padding_mask: Tensor, default: None
+            Padding mask for image features of size (B, HW).
+        q_pos: Tensor, default: None
+            Positional encodings for the interaction queries.
+        kv_pos: Tensor, default: None
+            Positional encodings for the image features.
+        return_q_attn_weights: bool, default: False
+            If `True`, return the self attention weights.
+        return_qk_attn_weights: bool, default: False
+            If `True`, return the cross attention weights.
 
         Returns:
         --------
-        Tensor
-            Output feature maps of shape (B, H, W, C).
+        outputs: list
+            A list with the order [queries, q_attn_w, qk_attn_w], if both weights are
+            to be returned.
         """
-        return self.blocks(x)
+        q = k = self.with_pos_embed(queries, q_pos)
+        # Perform self attention amongst queries
+        q_attn, q_attn_weights = self.q_attn(
+            q, k, value=queries, attn_mask=q_mask,
+            key_padding_mask=q_padding_mask
+        )
+        queries = self.ln1(queries + self.dp1(q_attn))
+        # Perform cross attention from memory features to queries
+        qk_attn, qk_attn_weights = self.qk_attn(
+            query=self.with_pos_embed(queries, q_pos),
+            key=self.with_pos_embed(features, kv_pos),
+            value=features, attn_mask=kv_mask,
+            key_padding_mask=kv_padding_mask
+        )
+        queries = self.ln2(queries + self.dp2(qk_attn))
+        queries = self.ln3(queries + self.dp3(self.ffn(queries)))
+
+        outputs = [queries,]
+        if return_q_attn_weights:
+            outputs.append(q_attn_weights)
+        if return_qk_attn_weights:
+            outputs.append(qk_attn_weights)
+        return outputs
+
+class TransformerDecoder(nn.Module):
+
+    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
+        self.return_intermediate = return_intermediate
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, queries, features,
+            q_mask: Optional[Tensor] = None,
+            kv_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+            q_pos: Optional[Tensor] = None,
+            kv_pos: Optional[Tensor] = None,
+            return_q_attn_weights: Optional[bool] = False,
+            return_qk_attn_weights: Optional[bool] = False
+        ):
+        # Add support for zero layers
+        if self.num_layers == 0:
+            return queries.unsqueeze(0)
+
+        outputs = [queries,]
+        intermediate = []
+        q_attn_w = []
+        qk_attn_w = []
+        for layer in self.layers:
+            outputs = layer(
+                outputs[0], features,
+                q_mask=q_mask, kv_mask=kv_mask,
+                q_padding_mask=q_padding_mask,
+                kv_padding_mask=kv_padding_mask,
+                q_pos=q_pos, kv_pos=kv_pos,
+                return_q_attn_weights=return_q_attn_weights,
+                return_qk_attn_weights=return_qk_attn_weights
+            )
+            if self.return_intermediate:
+                intermediate.append(self.norm(outputs[0]))
+            if return_q_attn_weights:
+                q_attn_w.append(outputs[1])
+            if return_qk_attn_weights:
+                qk_attn_w.append(outputs[2])
+
+        if self.return_intermediate:
+            outputs = [torch.stack(intermediate),]
+        else:
+            outputs = [self.norm(outputs[0]).unsqueeze(0),]
+        if return_q_attn_weights:
+            q_attn_w = torch.stack(q_attn_w)
+            outputs.append(q_attn_w)
+        if return_qk_attn_weights:
+            qk_attn_w = torch.stack(qk_attn_w)
+            outputs.append(qk_attn_w)
+        return outputs
 
 class Permute(nn.Module):
     def __init__(self, dims: List[int]):
@@ -227,21 +311,50 @@ class Permute(nn.Module):
         return x.permute(self.dims)
 
 class FeatureHead(nn.Module):
-    def __init__(self, dim, dim_backbone):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.dim_backbone = dim_backbone
+        self.num_feature_levels = 4
+        self.feature_dim = [512, 1024, 2048, 2048]
 
-        if dim != dim_backbone:
-            align = nn.Conv2d(dim_backbone, dim, 1)
-        else:
-            align = nn.Identity()
-        self.layers = nn.Sequential(
-            align, Permute([0, 2, 3, 1]),
-            SwinTransformer(dim)
+        input_proj_list = []
+        for i, fd in enumerate(self.feature_dim):
+            if i == 3:
+                input_proj_list.append(nn.Sequential(
+                    # Stride 2 conv. to create C6.
+                    nn.Conv2d(fd, dim, 3, stride=2, padding=1),
+                    nn.GroupNorm(32, dim),
+                ))
+            else:
+                input_proj_list.append(nn.Sequential(
+                    # Only align feature dimensions for C3-C5.
+                    nn.Conv2d(fd, dim, 1),
+                    nn.GroupNorm(32, dim)
+                ))
+        self.input_proj = nn.ModuleList(input_proj_list)
+
+        encoder_layer = M.DeformableTransformerEncoderLayer(
+            d_model=dim, d_ffn=dim * 4
         )
+        self.encoder = M.DeformableTransformerEncoder(
+            encoder_layer, 6
+        )
+        self.level_embed = nn.Parameter(
+            torch.Tensor(self.num_feature_levels, dim)
+        )
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, M.MSDeformAttn):
+                m._reset_parameters()
+        normal_(self.level_embed)
+
     def forward(self, x):
-        return self.layers(x)
+        return 1
 
 class UPT(nn.Module):
     """
@@ -446,11 +559,30 @@ class UPT(nn.Module):
         boxes = [r['boxes'] for r in region_props]
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
-        # if triplet_cands is None:
-            # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
-            # triplet_cands = [None for _ in range(len(boxes))]
-        # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
-        # padded_queries, q_padding_mask = pad_queries(mm_queries)
+        
+        # Construct additional C6 (1/64) level.
+        feat_c6 = self.input_proj[-1](src)
+        mask_c6 = F.interpolate(
+            images.mask[None].float(),
+            size=feat_c6.shape[-2:]
+        ).to(torch.bool)[0]
+        pos_c6 = self.backbone[1](NestedTensor(feat_c6, mask_c6)).to(feat_c6.dtype)
+
+        # Construct multiscale features.
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            # Skip C2 features.
+            if l == 0:
+                continue
+            src, mask = feat.decompose()
+            srcs.append(self.input_proj[l-1](src))
+            masks.append(mask)
+        srcs.append(feat_c6)
+        masks.append(mask_c6)
+        pos.append(pos_c6)
+
+        # TODO transformer forward
 
         src, mask = features[self.fusion_layer].decompose()
         memory = self.feature_head(src)
@@ -514,9 +646,7 @@ def build_detector(args, obj_to_verb):
         num_layers=args.triplet_dec_layers,
         return_intermediate=args.triplet_aux_loss
     )
-    factor = 2 ** (args.backbone_fusion_layer + 1)
-    backbone_fusion_dim = int(factor * detr.backbone.num_channels)
-    feature_head = FeatureHead(args.hidden_dim, backbone_fusion_dim)
+    feature_head = FeatureHead(args.hidden_dim)
     detector = UPT(
         detr, postprocessors['bbox'],
         feature_head=feature_head,

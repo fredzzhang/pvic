@@ -236,6 +236,117 @@ class FeatureHead(nn.Module):
 
         return memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten
 
+class MSDeformAttn(M.MSDeformAttn):
+    def __init__(self, q_dim, kv_dim, n_levels=4, n_heads=8, n_points=4):
+        """
+        A wrapper of the multiscale deformable attention module to allow
+        keys and queries to have different dimensions.
+        """
+        # Still have to call this method for nn.Module to be properly
+        # initialised, although certain modules will be overriden.
+        super().__init__(q_dim, n_levels, n_heads, n_points)
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim
+        self.value_proj = nn.Linear(kv_dim, q_dim)
+
+        self._reset_parameters()
+
+class DeformableTransformerDecoderLayer(nn.Module):
+    def __init__(self,
+        q_dim, kv_dim, d_ffn,
+        dropout=0.1, n_levels=4, n_heads=8, n_points=4
+    ):
+        super().__init__()
+        self.q_attn = nn.MultiheadAttention(q_dim, n_heads, dropout=dropout)
+        self.qk_attn = MSDeformAttn(
+            q_dim=q_dim, kv_dim=kv_dim,
+            n_levels=n_levels, n_heads=n_heads, n_points=n_points
+        )
+        self.ffn = nn.Sequential(
+            nn.Linear(q_dim, d_ffn),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ffn, q_dim)
+        )
+        self.ln1 = nn.LayerNorm(q_dim)
+        self.ln2 = nn.LayerNorm(q_dim)
+        self.ln3 = nn.LayerNorm(q_dim)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
+        self.dp3 = nn.Dropout(dropout)
+
+    @staticmethod
+    def with_pos_embed(tensor, pos):
+        return tensor if pos is None else tensor + pos
+
+    def forward(self,
+        queries, features, reference_points,
+        kv_spatial_shapes, level_start_index,
+        q_pos: Optional[Tensor] = None,
+        kv_padding_mask: Optional[Tensor] = None
+    ):
+        q = k = self.with_pos_embed(queries, q_pos)
+        # Perform self attention amongst queries.
+        q_attn = self.q_attn(
+            q.transpose(0, 1),
+            k.transpose(0, 1),
+            queries.transpose(0, 1)
+        )[0].transpose(0, 1)
+        queries = self.ln1(queries + self.dp1(q_attn))
+        # Perform cross attention from memory features to queries.
+        qk_attn = self.qk_attn(
+            self.with_pos_embed(queries, q_pos),
+            reference_points, features,
+            kv_spatial_shapes, level_start_index, kv_padding_mask
+        )
+        queries = self.ln2(queries + self.dp2(qk_attn))
+        queries = self.ln3(queries + self.dp3(self.ffn(queries)))
+
+        return queries
+
+class DeformableTransformerDecoder(nn.Module):
+    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.return_intermediate = return_intermediate
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, M.MSDeformAttn):
+                m._reset_parameters()
+
+    def forward(self,
+        queries, features, reference_points,
+        kv_spatial_shapes, kv_valid_ratios, level_start_index,
+        q_pos: Optional[Tensor] = None,
+        kv_padding_mask: Optional[Tensor] = None
+    ):
+        output = queries
+        intermediate = []
+        for layer in self.layers:
+            assert reference_points.shape[-1] == 2
+            reference_points_input = reference_points[:, :, None] * kv_valid_ratios[:, None]
+            output = layer(
+                output, features, reference_points_input,
+                kv_spatial_shapes, level_start_index,
+                q_pos=q_pos, kv_padding_mask=kv_padding_mask
+            )
+
+            if self.return_intermediate:
+                intermediate.append(output)
+
+        if self.return_intermediate:
+            return torch.stack(intermediate)
+
+        return output
+
+
 class UPT(nn.Module):
     """
     Unary-pairwise transformer
@@ -459,9 +570,9 @@ class UPT(nn.Module):
         ho_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
             hs, _ = self.decoder(
-                ho_q[None], reference_points[i][None], mem[None],
-                spatial_shapes, level_start_index,
-                valid_ratios[i: i+1], None, mask_flatten[i: i+1]
+                ho_q[None], mem[None], reference_points[i][None],
+                spatial_shapes, valid_ratios[i: i+1], level_start_index,
+                None, mask_flatten[i: i+1]
             )
             ho_embeds.append(hs[:, 0])
         ho_embeds = torch.cat(ho_embeds, dim=1)
@@ -497,10 +608,11 @@ def build_detector(args, obj_to_verb):
     # else:
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
-    decoder_layer = M.DeformableTransformerDecoderLayer(
-        d_model=args.repr_dim, d_ffn=args.repr_dim * 4
+    decoder_layer = DeformableTransformerDecoderLayer(
+        q_dim=args.repr_dim, kv_dim=args.hidden_dim,
+        d_ffn=args.repr_dim * 4
     )
-    triplet_decoder = M.DeformableTransformerDecoder(
+    triplet_decoder = DeformableTransformerDecoder(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers,
         return_intermediate=args.triplet_aux_loss

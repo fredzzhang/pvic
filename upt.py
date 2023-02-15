@@ -242,7 +242,7 @@ class FeatureHead(nn.Module):
 
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, if_q_attn=True, dropout=0.1):
         """
         Transformer decoder layer, adapted from DETR codebase by Facebook Research
         https://github.com/facebookresearch/detr/blob/main/models/transformer.py#L187
@@ -266,8 +266,12 @@ class TransformerDecoderLayer(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
+        self.if_q_attn = if_q_attn
 
-        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
+        if if_q_attn:
+            self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
+            self.ln1 = nn.LayerNorm(q_dim)
+            self.dp1 = nn.Dropout(dropout)
         self.qk_attn = nn.MultiheadAttention(
             q_dim, num_heads,
             kdim=kv_dim, vdim=kv_dim,
@@ -279,10 +283,8 @@ class TransformerDecoderLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim)
         )
-        self.ln1 = nn.LayerNorm(q_dim)
         self.ln2 = nn.LayerNorm(q_dim)
         self.ln3 = nn.LayerNorm(q_dim)
-        self.dp1 = nn.Dropout(dropout)
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
 
@@ -331,13 +333,14 @@ class TransformerDecoderLayer(nn.Module):
             A list with the order [queries, q_attn_w, qk_attn_w], if both weights are
             to be returned.
         """
-        q = k = self.with_pos_embed(queries, q_pos)
-        # Perform self attention amongst queries
-        q_attn, q_attn_weights = self.q_attn(
-            q, k, value=queries, attn_mask=q_mask,
-            key_padding_mask=q_padding_mask
-        )
-        queries = self.ln1(queries + self.dp1(q_attn))
+        if self.if_q_attn:
+            q = k = self.with_pos_embed(queries, q_pos)
+            # Perform self attention amongst queries
+            q_attn, q_attn_weights = self.q_attn(
+                q, k, value=queries, attn_mask=q_mask,
+                key_padding_mask=q_padding_mask
+            )
+            queries = self.ln1(queries + self.dp1(q_attn))
         # Perform cross attention from memory features to queries
         qk_attn, qk_attn_weights = self.qk_attn(
             query=self.with_pos_embed(queries, q_pos),
@@ -357,12 +360,18 @@ class TransformerDecoderLayer(nn.Module):
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+    def __init__(self, num_layers, return_intermediate=False, **kwargs):
         super().__init__()
-        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        layers = nn.ModuleList()
+        for i in range(num_layers):
+            if i == 0:
+                layers.append(TransformerDecoderLayer(**kwargs))
+            else:
+                layers.append(TransformerDecoderLayer(if_q_attn=False, **kwargs))
+        self.layers = layers
         self.num_layers = num_layers
-        self.norm = nn.LayerNorm(decoder_layer.q_dim)
         self.return_intermediate = return_intermediate
+        self.norm = nn.LayerNorm(kwargs["q_dim"])
 
         self._reset_parameters()
 
@@ -679,15 +688,12 @@ def build_detector(args, obj_to_verb):
     # else:
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
-    decoder_layer = TransformerDecoderLayer(
+    triplet_decoder = TransformerDecoder(
+        num_layers=args.triplet_dec_layers,
+        return_intermediate=args.triplet_aux_loss,
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
-    )
-    triplet_decoder = TransformerDecoder(
-        decoder_layer=decoder_layer,
-        num_layers=args.triplet_dec_layers,
-        return_intermediate=args.triplet_aux_loss
     )
     factor = 2 ** (args.backbone_fusion_layer + 1)
     backbone_fusion_dim = int(factor * detr.backbone.num_channels)

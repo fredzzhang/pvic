@@ -311,6 +311,9 @@ class DeformableTransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
 
+        if return_intermediate and num_layers == 0:
+            raise ValueError("Zero layers are not supported when \'return_intermediate\' is set to True.")
+
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -330,8 +333,9 @@ class DeformableTransformerDecoder(nn.Module):
         output = queries
         intermediate = []
         for layer in self.layers:
-            assert reference_points.shape[-1] == 2
-            reference_points_input = reference_points[:, :, None] * kv_valid_ratios[:, None]
+            # The valid ratios are not used to get the precise position of the box centres.
+            reference_points_input = reference_points[:, :, None]
+            # reference_points_input = reference_points[:, :, None] * kv_valid_ratios[:, None]
             output = layer(
                 output, features, reference_points_input,
                 kv_spatial_shapes, level_start_index,
@@ -344,7 +348,7 @@ class DeformableTransformerDecoder(nn.Module):
         if self.return_intermediate:
             return torch.stack(intermediate)
 
-        return output
+        return output[None]
 
 
 class UPT(nn.Module):
@@ -569,7 +573,7 @@ class UPT(nn.Module):
         # Run decoder per image, due to the disparity in query numbers.
         ho_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
-            hs, _ = self.decoder(
+            hs = self.decoder(
                 ho_q[None], mem[None], reference_points[i][None],
                 spatial_shapes, valid_ratios[i: i+1], level_start_index,
                 None, mask_flatten[i: i+1]

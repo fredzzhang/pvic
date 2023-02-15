@@ -146,7 +146,6 @@ if __name__ == '__main__':
     parser.add_argument('--clip-max-norm', default=0.1, type=float)
 
     parser.add_argument('--backbone', default='resnet50', type=str)
-    parser.add_argument('--backbone-fusion-layer', default=-1, type=int)
     parser.add_argument('--dilation', action='store_true')
     parser.add_argument('--position-embedding', default='sine', type=str, choices=('sine', 'learned'))
 

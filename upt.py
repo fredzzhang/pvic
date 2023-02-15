@@ -384,7 +384,6 @@ class UPT(nn.Module):
         detector: nn.Module,
         postprocessor: nn.Module,
         feature_head: nn.Module,
-        backbone_fusion_layer: int,
         triplet_decoder: nn.Module,
         # triplet_embeds: Tensor,
         # obj_to_triplet: list,
@@ -411,7 +410,6 @@ class UPT(nn.Module):
             human_idx=human_idx,
         )
         self.feature_head = feature_head
-        self.fusion_layer = backbone_fusion_layer
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -625,7 +623,6 @@ def build_detector(args, obj_to_verb):
     detector = UPT(
         detr, postprocessors['bbox'],
         feature_head=feature_head,
-        backbone_fusion_layer=args.backbone_fusion_layer,
         triplet_decoder=triplet_decoder,
         obj_to_verb=obj_to_verb,
         num_verbs=args.num_verbs,

@@ -11,6 +11,7 @@ Microsoft Research Asia
 import os
 import sys
 import torch
+import pocket
 import random
 import warnings
 import argparse
@@ -126,11 +127,11 @@ def sanity_check(args):
     args.num_verbs = 117
     args.num_triplets = 600
     object_to_target = dataset.dataset.object_to_verb
-    upt = build_detector(args, object_to_target)
+    upt = build_detector(args, object_to_target).cuda()
     if args.eval:
         upt.eval()
 
-    image, target = dataset[0]
+    image, target = pocket.ops.relocate_to_cuda(dataset[0])
     outputs = upt([image], targets=[target])
 
 if __name__ == '__main__':

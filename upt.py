@@ -175,14 +175,44 @@ class FeatureHead(nn.Module):
                 m._reset_parameters()
         normal_(self.level_embed)
 
-    def forward(self, srcs, masks, pos_embeds):
+    def get_valid_ratio(self, mask):
+        _, H, W = mask.shape
+        valid_H = torch.sum(~mask[:, :, 0], 1)
+        valid_W = torch.sum(~mask[:, 0, :], 1)
+        valid_ratio_h = valid_H.float() / H
+        valid_ratio_w = valid_W.float() / W
+        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        return valid_ratio
+
+    def forward(self, features, image_padding_mask, pos_embeds, pe):
+        # Construct multiscale features.
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            # Skip C2 features.
+            if l == 0:
+                continue
+            src, mask = feat.decompose()
+            srcs.append(self.input_proj[l-1](src))
+            masks.append(mask)
+        # Construct additional C6 (1/64) level.
+        feat_c6 = self.input_proj[-1](features[-1].tensors)
+        mask_c6 = F.interpolate(
+            image_padding_mask[None].float(),
+            size=feat_c6.shape[-2:]
+        ).to(torch.bool)[0]
+        pos_c6 = pe(NestedTensor(feat_c6, mask_c6)).to(feat_c6.dtype)
+        srcs.append(feat_c6)
+        masks.append(mask_c6)
+        pos_embeds.append(pos_c6)
+
         # Prepare inputs for the encoder.
         src_flatten = []
         mask_flatten = []
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
-            bs, c, h, w = src.shape
+            h, w = src.shape[2:]
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
             src = src.flatten(2).transpose(1, 2)
@@ -345,7 +375,9 @@ class UPT(nn.Module):
         reference_points = []
         for bx, p_inds, sz in zip(boxes, paired_inds, image_sizes):
             h, w = sz
-            bx_c = torch.stack([bx[:, 0] / w, bx[:, 1] / h], dim=1)
+            cx = (bx[:, 0] + bx[:, 2]) / 2
+            cy = (bx[:, 1] + bx[:, 3]) / 2
+            bx_c = torch.stack([cx / w, cy / h], dim=1)
             p_bx_c = bx_c[p_inds].mean(1)
             reference_points.append(p_bx_c)
         return reference_points
@@ -419,29 +451,8 @@ class UPT(nn.Module):
 
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
 
-        # Construct multiscale features.
-        srcs = []
-        masks = []
-        for l, feat in enumerate(features):
-            # Skip C2 features.
-            if l == 0:
-                continue
-            src, mask = feat.decompose()
-            srcs.append(self.input_proj[l-1](src))
-            masks.append(mask)
-        # Construct additional C6 (1/64) level.
-        feat_c6 = self.input_proj[-1](features[-1].tensors)
-        mask_c6 = F.interpolate(
-            images.mask[None].float(),
-            size=feat_c6.shape[-2:]
-        ).to(torch.bool)[0]
-        pos_c6 = self.backbone[1](NestedTensor(feat_c6, mask_c6)).to(feat_c6.dtype)
-        srcs.append(feat_c6)
-        masks.append(mask_c6)
-        pos.append(pos_c6)
-
         # Compute keys/values for the triplet decoder.
-        memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten = self.feature_head(srcs, masks, pos)
+        memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten = self.feature_head(features, images.mask, pos[1:], self.backbone[1])
 
         reference_points = self.fetch_reference_points(boxes, paired_inds, image_sizes)
         # Run decoder per image, due to the disparity in query numbers.

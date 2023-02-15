@@ -330,6 +330,10 @@ class DeformableTransformerDecoder(nn.Module):
         q_pos: Optional[Tensor] = None,
         kv_padding_mask: Optional[Tensor] = None
     ):
+        if queries.numel() == 0:
+            rp = self.num_layers if self.return_intermediate else 1
+            return queries[None].repeat(rp, 1, 1)
+
         output = queries
         intermediate = []
         for layer in self.layers:
@@ -565,7 +569,9 @@ class UPT(nn.Module):
         ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
 
         # Compute keys/values for the triplet decoder.
-        memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten = self.feature_head(features, images.mask, pos[1:], self.backbone[1])
+        memory, spatial_shapes, level_start_index, valid_ratios, mask_flatten = self.feature_head(
+            features, images.mask, pos[1:], self.backbone[1]
+        )
 
         reference_points = self.fetch_reference_points(boxes, paired_inds, image_sizes)
         # Run decoder per image, due to the disparity in query numbers.

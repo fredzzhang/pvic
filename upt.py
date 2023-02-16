@@ -28,6 +28,7 @@ from ops import (
 )
 
 import d_detr.models.deformable_transformer as M
+from d_detr.models.ops.functions import MSDeformAttnFunction
 
 import sys
 sys.path.append('detr')
@@ -239,8 +240,9 @@ class FeatureHead(nn.Module):
 class MSDeformAttn(M.MSDeformAttn):
     def __init__(self, q_dim, kv_dim, n_levels=4, n_heads=8, n_points=4):
         """
-        A wrapper of the multiscale deformable attention module to allow
-        keys and queries to have different dimensions.
+        A wrapper of the multiscale deformable attention module that enables
+            1. Different dimensions for keys and queries.
+            2. Different(multiple) reference points for keys in the same feature level.
         """
         # Still have to call this method for nn.Module to be properly
         # initialised, although certain modules will be overriden.
@@ -250,6 +252,58 @@ class MSDeformAttn(M.MSDeformAttn):
         self.value_proj = nn.Linear(kv_dim, q_dim)
 
         self._reset_parameters()
+
+    def forward(self,
+        query, reference_points, input_flatten,
+        input_spatial_shapes, input_level_start_index,
+        input_padding_mask: Optional[Tensor] = None
+    ):
+        N, Len_q, _ = query.shape
+        N, Len_in, _ = input_flatten.shape
+        assert (input_spatial_shapes[:, 0] * input_spatial_shapes[:, 1]).sum() == Len_in
+
+        value = self.value_proj(input_flatten)
+        if input_padding_mask is not None:
+            value = value.masked_fill(input_padding_mask[..., None], float(0))
+        value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
+        sampling_offsets = self.sampling_offsets(query).view(
+            N, Len_q, self.n_heads, self.n_levels, self.n_points, 2
+        )
+        attention_weights = self.attention_weights(query).view(
+            N, Len_q, self.n_heads, self.n_levels * self.n_points
+        )
+        attention_weights = F.softmax(attention_weights, -1).view(
+            N, Len_q, self.n_heads, self.n_levels, self.n_points
+        )
+        if reference_points.ndim == 5:
+            """
+            NOTE: New behaviour
+            Assume the data has shape (N, Len_q, n_levels, n_ref, 2), where n_ref is the
+            number of reference points for each query. The keys will be evenly distributed
+            amongst these reference points, i.e. n_points // n_ref.
+            """
+            offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+            if self.n_points % reference_points.shape[-2]:
+                raise ValueError("Number of keys indivisible by the number of ref. points.")
+            rp = self.n_points // reference_points.shape[-2]
+            sampling_locations = reference_points[:, :, None].repeat_interleave(rp, dim=-2) \
+                                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+        # N, Len_q, n_heads, n_levels, n_points, 2
+        elif reference_points.shape[-1] == 2:
+            offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+            sampling_locations = reference_points[:, :, None, :, None, :] \
+                                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+        elif reference_points.shape[-1] == 4:
+            sampling_locations = reference_points[:, :, None, :, None, :2] \
+                                 + sampling_offsets / self.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
+        else:
+            raise ValueError(
+                'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
+        output = MSDeformAttnFunction.apply(
+            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step)
+        output = self.output_proj(output)
+
+        return output
 
 class DeformableTransformerDecoderLayer(nn.Module):
     def __init__(self,
@@ -488,14 +542,16 @@ class UPT(nn.Module):
 
         return detections
 
-    def fetch_reference_points(self, boxes, paired_inds, image_sizes):
+    def fetch_reference_points(self, boxes, paired_inds, image_sizes, mean=False):
         reference_points = []
         for bx, p_inds, sz in zip(boxes, paired_inds, image_sizes):
             h, w = sz
             cx = (bx[:, 0] + bx[:, 2]) / 2
             cy = (bx[:, 1] + bx[:, 3]) / 2
             bx_c = torch.stack([cx / w, cy / h], dim=1)
-            p_bx_c = bx_c[p_inds].mean(1)
+            p_bx_c = bx_c[p_inds]
+            if mean:
+                p_bx_c = p_bx_c.mean(1)
             reference_points.append(p_bx_c)
         return reference_points
 
@@ -616,9 +672,10 @@ def build_detector(args, obj_to_verb):
     # else:
     #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
 
+    n_points = 8 if args.dual_ref else 4
     decoder_layer = DeformableTransformerDecoderLayer(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
-        d_ffn=args.repr_dim * 4
+        d_ffn=args.repr_dim * 4, n_points=n_points
     )
     triplet_decoder = DeformableTransformerDecoder(
         decoder_layer=decoder_layer,

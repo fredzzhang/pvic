@@ -332,7 +332,7 @@ class DeformableTransformerDecoder(nn.Module):
     ):
         if queries.numel() == 0:
             rp = self.num_layers if self.return_intermediate else 1
-            return queries[None].repeat(rp, 1, 1)
+            return queries[None].repeat(rp, 1, 1, 1)
 
         output = queries
         intermediate = []

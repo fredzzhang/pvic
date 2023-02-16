@@ -133,7 +133,7 @@ class Permute(nn.Module):
         return x.permute(self.dims)
 
 class FeatureHead(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, num_enc_layers):
         super().__init__()
         self.dim = dim
         self.num_feature_levels = 4
@@ -159,7 +159,7 @@ class FeatureHead(nn.Module):
             d_model=dim, d_ffn=dim * 4
         )
         self.encoder = M.DeformableTransformerEncoder(
-            encoder_layer, 6
+            encoder_layer, num_enc_layers
         )
         self.level_embed = nn.Parameter(
             torch.Tensor(self.num_feature_levels, dim)
@@ -625,7 +625,7 @@ def build_detector(args, obj_to_verb):
         num_layers=args.triplet_dec_layers,
         return_intermediate=args.triplet_aux_loss
     )
-    feature_head = FeatureHead(args.hidden_dim)
+    feature_head = FeatureHead(args.hidden_dim, args.triplet_enc_layers)
     detector = UPT(
         detr, postprocessors['bbox'],
         feature_head=feature_head,

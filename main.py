@@ -159,6 +159,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-queries', default=100, type=int)
     parser.add_argument('--pre-norm', action='store_true')
 
+    parser.add_argument('--dual-ref', default=False, action="store_true")
     parser.add_argument('--triplet-enc-layers', default=4, type=int)
     parser.add_argument('--triplet-dec-layers', default=1, type=int)
     parser.add_argument('--triplet-aux-loss', default=False, action='store_true')

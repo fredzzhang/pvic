@@ -169,7 +169,7 @@ class VerbMatcher(nn.Module):
 
 class SwinTransformer(nn.Module):
 
-    def __init__(self, dim):
+    def __init__(self, dim, num_layers):
         """
         A feature stage consisting of a series of Swin Transformer V2 blocks.
 
@@ -181,7 +181,7 @@ class SwinTransformer(nn.Module):
         super().__init__()
         self.dim = dim
 
-        self.depth = 6
+        self.depth = num_layers
         self.num_heads = dim // 32
         self.window_size = 8
         self.base_sd_prob = 0.2
@@ -191,7 +191,7 @@ class SwinTransformer(nn.Module):
             else [0, 0] for i in range(self.depth)
         ]
         # Use stochastic depth parameters for the third stage of Swin-T variant.
-        sd_prob = (torch.linspace(0, 1, 12)[4:10] * self.base_sd_prob).tolist()
+        sd_prob = (torch.linspace(0, 1, 12)[10-num_layers:10] * self.base_sd_prob).tolist()
 
         blocks: List[nn.Module] = []
         for i in range(self.depth):
@@ -225,7 +225,7 @@ class Permute(nn.Module):
         return x.permute(self.dims)
 
 class FeatureHead(nn.Module):
-    def __init__(self, dim, dim_backbone, return_layer):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers):
         super().__init__()
         self.dim = dim
         self.dim_backbone = dim_backbone
@@ -238,7 +238,7 @@ class FeatureHead(nn.Module):
         self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
         self.layers = nn.Sequential(
             Permute([0, 2, 3, 1]),
-            SwinTransformer(dim)
+            SwinTransformer(dim, num_layers)
         )
     def forward(self, x):
         pyramid = OrderedDict(
@@ -701,7 +701,8 @@ def build_detector(args, obj_to_verb):
     feature_head = FeatureHead(
         args.hidden_dim,
         detr.backbone.num_channels,
-        args.backbone_fusion_layer
+        args.backbone_fusion_layer,
+        args.triplet_enc_layers
     )
     detector = UPT(
         detr, postprocessors['bbox'],

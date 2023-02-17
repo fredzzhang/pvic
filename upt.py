@@ -142,14 +142,14 @@ class ModifiedEncoderLayer(nn.Module):
 
 class ModifiedEncoder(nn.Module):
     def __init__(self,
-        hidden_size: int = 256, representation_size: int = 384,
+        hidden_size: int = 256, repr_size: int = 384,
         num_heads: int = 8, num_layers: int = 2,
         dropout_prob: float = .1, return_weights: bool = False,
     ) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.mod_enc = nn.ModuleList([ModifiedEncoderLayer(
-            hidden_size=hidden_size, representation_size=representation_size,
+            hidden_size=hidden_size, repr_size=repr_size,
             num_heads=num_heads, dropout_prob=dropout_prob, return_weights=return_weights
         ) for _ in range(num_layers)])
 

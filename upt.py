@@ -142,14 +142,14 @@ class ModifiedEncoderLayer(nn.Module):
 
 class ModifiedEncoder(nn.Module):
     def __init__(self,
-        hidden_size: int = 256, representation_size: int = 384,
+        hidden_size: int = 256, repr_size: int = 384,
         num_heads: int = 8, num_layers: int = 2,
         dropout_prob: float = .1, return_weights: bool = False,
     ) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.mod_enc = nn.ModuleList([ModifiedEncoderLayer(
-            hidden_size=hidden_size, representation_size=representation_size,
+            hidden_size=hidden_size, repr_size=repr_size,
             num_heads=num_heads, dropout_prob=dropout_prob, return_weights=return_weights
         ) for _ in range(num_layers)])
 
@@ -278,7 +278,7 @@ class VerbMatcher(nn.Module):
 
 class SwinTransformer(nn.Module):
 
-    def __init__(self, dim):
+    def __init__(self, dim, num_layers):
         """
         A feature stage consisting of a series of Swin Transformer V2 blocks.
 
@@ -290,7 +290,7 @@ class SwinTransformer(nn.Module):
         super().__init__()
         self.dim = dim
 
-        self.depth = 6
+        self.depth = num_layers
         self.num_heads = dim // 32
         self.window_size = 8
         self.base_sd_prob = 0.2
@@ -300,7 +300,7 @@ class SwinTransformer(nn.Module):
             else [0, 0] for i in range(self.depth)
         ]
         # Use stochastic depth parameters for the third stage of Swin-T variant.
-        sd_prob = (torch.linspace(0, 1, 12)[4:10] * self.base_sd_prob).tolist()
+        sd_prob = (torch.linspace(0, 1, 12)[10-num_layers:10] * self.base_sd_prob).tolist()
 
         blocks: List[nn.Module] = []
         for i in range(self.depth):
@@ -334,7 +334,7 @@ class Permute(nn.Module):
         return x.permute(self.dims)
 
 class FeatureHead(nn.Module):
-    def __init__(self, dim, dim_backbone, return_layer):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers):
         super().__init__()
         self.dim = dim
         self.dim_backbone = dim_backbone
@@ -347,7 +347,7 @@ class FeatureHead(nn.Module):
         self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
         self.layers = nn.Sequential(
             Permute([0, 2, 3, 1]),
-            SwinTransformer(dim)
+            SwinTransformer(dim, num_layers)
         )
     def forward(self, x):
         pyramid = OrderedDict(
@@ -810,7 +810,8 @@ def build_detector(args, obj_to_verb):
     feature_head = FeatureHead(
         args.hidden_dim,
         detr.backbone.num_channels,
-        args.backbone_fusion_layer
+        args.backbone_fusion_layer,
+        args.triplet_enc_layers
     )
     detector = UPT(
         detr, postprocessors['bbox'],

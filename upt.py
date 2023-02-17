@@ -10,11 +10,12 @@ Microsoft Research Asia
 import os
 import copy
 import torch
+import pocket
 import torch.nn.functional as F
 import torch.distributed as dist
 
 from torch import nn, Tensor
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from collections import OrderedDict
 from swint import SwinTransformerBlockV2
 from torchvision.ops import FeaturePyramidNetwork
@@ -56,6 +57,109 @@ class MultiModalFusion(nn.Module):
         z = self.mlp(z)
         return z
 
+class ModifiedEncoderLayer(nn.Module):
+    def __init__(self,
+        hidden_size: int, repr_size: int,
+        num_heads: int = 8, dropout_prob: float = .1, return_weights: bool = False,
+    ) -> None:
+        super().__init__()
+        if repr_size % num_heads != 0:
+            raise ValueError(
+                f"The given representation size {repr_size} "
+                f"should be divisible by the number of attention heads {num_heads}."
+            )
+        self.sub_repr_size = int(repr_size / num_heads)
+
+        self.hidden_size = hidden_size
+        self.repr_size = repr_size
+
+        self.num_heads = num_heads
+        self.return_weights = return_weights
+
+        self.unary = nn.Linear(hidden_size, repr_size)
+        self.pairwise = nn.Linear(repr_size, repr_size)
+        self.attn = nn.ModuleList([nn.Linear(3 * self.sub_repr_size, 1) for _ in range(num_heads)])
+        self.message = nn.ModuleList([nn.Linear(self.sub_repr_size, self.sub_repr_size) for _ in range(num_heads)])
+        self.aggregate = nn.Linear(repr_size, hidden_size)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout_prob)
+
+        self.ffn = pocket.models.FeedForwardNetwork(hidden_size, hidden_size * 4, dropout_prob)
+
+    def reshape(self, x: Tensor) -> Tensor:
+        new_x_shape = x.size()[:-1] + (
+            self.num_heads,
+            self.sub_repr_size
+        )
+        x = x.view(*new_x_shape)
+        if len(new_x_shape) == 3:
+            return x.permute(1, 0, 2)
+        elif len(new_x_shape) == 4:
+            return x.permute(2, 0, 1, 3)
+        else:
+            raise ValueError("Incorrect tensor shape")
+
+    def forward(self, x: Tensor, y: Tensor) -> Tuple[Tensor, Optional[Tensor]]:
+        device = x.device
+        n = len(x)
+
+        u = F.relu(self.unary(x))
+        p = F.relu(self.pairwise(y))
+
+        # Unary features (H, N, L)
+        u_r = self.reshape(u)
+        # Pairwise features (H, N, N, L)
+        p_r = self.reshape(p)
+
+        i, j = torch.meshgrid(torch.arange(n, device=device), torch.arange(n, device=device))
+        # Features used to compute attention (H, N, N, 3L)
+        attn_features = torch.cat([u_r[:, i], u_r[:, j], p_r], dim=-1)
+        # Attention weights (H,) (N, N, 1)
+        weights = [
+            F.softmax(l(f), dim=0) for f, l
+            in zip(attn_features, self.attn)
+        ]
+        # Repeated unary feaures along the third dimension (H, N, N, L)
+        u_r_repeat = u_r.unsqueeze(dim=2).repeat(1, 1, n, 1)
+        messages = [
+            l(f_1 * f_2) for f_1, f_2, l
+            in zip(u_r_repeat, p_r, self.message)
+        ]
+        aggregated_messages = self.aggregate(F.relu(
+            torch.cat([
+                (w * m).sum(dim=0) for w, m
+                in zip(weights, messages)
+            ], dim=-1)
+        ))
+        aggregated_messages = self.dropout(aggregated_messages)
+        x = self.norm(x + aggregated_messages)
+        x = self.ffn(x)
+
+        if self.return_weights: attn = weights
+        else: attn = None
+
+        return x, attn
+
+class ModifiedEncoder(nn.Module):
+    def __init__(self,
+        hidden_size: int = 256, representation_size: int = 384,
+        num_heads: int = 8, num_layers: int = 2,
+        dropout_prob: float = .1, return_weights: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_layers = num_layers
+        self.mod_enc = nn.ModuleList([ModifiedEncoderLayer(
+            hidden_size=hidden_size, representation_size=representation_size,
+            num_heads=num_heads, dropout_prob=dropout_prob, return_weights=return_weights
+        ) for _ in range(num_layers)])
+
+    def forward(self, x: Tensor, y: Tensor) -> Tuple[Tensor, List[Optional[Tensor]]]:
+        attn_weights = []
+        for layer in self.mod_enc:
+            x, attn = layer(x, y)
+            attn_weights.append(attn)
+        return x, attn_weights
+
 class HumanObjectMatcher(nn.Module):
     def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
         super().__init__()
@@ -69,7 +173,8 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(128, 256), nn.ReLU(),
             nn.Linear(256, repr_size), nn.ReLU(),
         )
-        self.mbf = MultiModalFusion(512, repr_size, repr_size)
+        self.encoder = ModifiedEncoder(256, repr_size, num_layers=2)
+        self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
@@ -103,15 +208,19 @@ class HumanObjectMatcher(nn.Module):
                 prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
                 continue
+            x = x.flatten(); y = y.flatten()
             # Compute spatial features
             pairwise_spatial = compute_spatial_encodings(
-                [boxes[x_keep],], [boxes[y_keep],], [image_sizes[i],]
+                [boxes[x],], [boxes[y],], [image_sizes[i],]
             )
             pairwise_spatial = self.spatial_head(pairwise_spatial)
+            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
+
+            embeds, _ = self.encoder(embeds, pairwise_spatial_reshaped)
             # Compute human-object queries
-            ho_q = self.mbf(
+            ho_q = self.mmf(
                 torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
-                pairwise_spatial
+                pairwise_spatial_reshaped[x_keep, y_keep]
             )
             # Append matched human-object pairs
             ho_queries.append(ho_q)
@@ -132,7 +241,7 @@ class VerbMatcher(nn.Module):
         self.num_objs = num_objs
         self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
 
-        self.mbf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
+        self.mmf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
     def forward(self, ho_queries, object_types, triplet_cands):
         device = ho_queries[0].device
 
@@ -159,7 +268,7 @@ class VerbMatcher(nn.Module):
 
             dup_inds, t_inds = matched_vb.unbind(1)
 
-            mm_queries.append(self.mbf(
+            mm_queries.append(self.mmf(
                 ho_q[dup_inds], self.triplet_embeds[t_inds]
             ))
             dup_indices.append(dup_inds)

@@ -149,8 +149,17 @@ class CustomisedDLE(DistributedLearningEngine):
         self.test_dataloader = test_dataloader
 
     def _on_start(self):
+        ap = self.test_hico()
         if self._rank == 0:
-            self.best_perf = 0
+            # Fetch indices for rare and non-rare classes
+            rare = self.test_dataloader.dataset.dataset.rare
+            non_rare = self.test_dataloader.dataset.dataset.non_rare
+            perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
+            print(
+                f"Epoch {self._state.epoch} =>\t"
+                f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
+            )
+            self.best_perf = perf[0]
             wandb.init(config=self.config)
             wandb.watch(self._state.net.module)
             wandb.define_metric("epochs")
@@ -161,6 +170,11 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.define_metric("training_steps")
             wandb.define_metric("elapsed_time", step_metric="training_steps", summary="max")
             wandb.define_metric("loss", step_metric="training_steps", summary="min")
+
+            wandb.log({
+                "epochs": self._state.epoch, "mAP full": perf[0],
+                "mAP rare": perf[1], "mAP non_rare": perf[2]
+            })
 
     def _on_end(self):
         if self._rank == 0:

@@ -53,20 +53,18 @@ def main(rank, args):
     train_loader = DataLoader(
         dataset=trainset,
         collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        num_workers=args.num_workers, pin_memory=True,
         sampler=DistributedSampler(
-            trainset, 
-            num_replicas=args.world_size, 
-            rank=rank)
+            trainset, num_replicas=args.world_size,
+            rank=rank, drop_last=True)
     )
     test_loader = DataLoader(
         dataset=testset,
         collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        num_workers=args.num_workers, pin_memory=True,
         sampler=DistributedSampler(
-            testset,
-            num_replicas=args.world_size,
-            rank=rank)
+            testset, num_replicas=args.world_size,
+            rank=rank, drop_last=True)
     )
 
     if args.dataset == 'hicodet':

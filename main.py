@@ -54,20 +54,18 @@ def main(rank, args):
     train_loader = DataLoader(
         dataset=trainset,
         collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        num_workers=args.num_workers, pin_memory=True,
         sampler=DistributedSampler(
-            trainset, 
-            num_replicas=args.world_size, 
-            rank=rank)
+            trainset, num_replicas=args.world_size,
+            rank=rank, drop_last=True)
     )
     test_loader = DataLoader(
         dataset=testset,
         collate_fn=custom_collate, batch_size=args.batch_size // args.world_size,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        num_workers=args.num_workers, pin_memory=True,
         sampler=DistributedSampler(
-            testset,
-            num_replicas=args.world_size,
-            rank=rank)
+            testset, num_replicas=args.world_size,
+            rank=rank, drop_last=True)
     )
 
     if args.dataset == 'hicodet':
@@ -160,7 +158,7 @@ if __name__ == '__main__':
     parser.add_argument('--pre-norm', action='store_true')
 
     parser.add_argument('--kv-feature-level', default="c6", type=str)
-    parser.add_argument('--triplet-enc-layers', default=4, type=int)
+    parser.add_argument('--triplet-enc-layers', default=1, type=int)
     parser.add_argument('--triplet-dec-layers', default=1, type=int)
     parser.add_argument('--triplet-aux-loss', default=False, action='store_true')
     parser.add_argument('--triplet-embeds', default="", type=str)

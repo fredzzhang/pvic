@@ -17,9 +17,7 @@ from torch import nn, Tensor
 from typing import Dict, List, Optional, Tuple
 from scipy.optimize import linear_sum_assignment
 
-import sys
-sys.path.append('detr')
-from util.box_ops import generalized_box_iou
+from detr.util.box_ops import generalized_box_iou
 
 class BalancedBoxSampler:
     def __init__(self, threshold: float = .2, perc: float = .8) -> None:

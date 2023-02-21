@@ -29,10 +29,8 @@ from ops import (
     pad_queries
 )
 
-import sys
-sys.path.append('detr')
-from models import build_model
-from util.misc import nested_tensor_from_tensor_list
+from detr.models import build_model
+from detr.util.misc import nested_tensor_from_tensor_list
 
 
 class MultiModalFusion(nn.Module):

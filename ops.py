@@ -14,7 +14,7 @@ import torchvision.ops.boxes as box_ops
 from torch import Tensor
 from typing import List, Tuple
 
-def compute_sinusoidal_pe(pos_tensor: Tensor) -> Tensor:
+def compute_sinusoidal_pe(pos_tensor: Tensor, temperature: float = 10000.) -> Tensor:
     """
     Compute positional embeddings for points or bounding boxes
 
@@ -22,6 +22,8 @@ def compute_sinusoidal_pe(pos_tensor: Tensor) -> Tensor:
     -----------
     pos_tensor: Tensor
         Coordinates of 2d points (x, y) normalised to (0, 1). The shape is (n_q, bs, 2).
+    temperature: float, Default: 10000.
+        The temperature parameter in sinusoidal functions.
 
     Returns:
     --------
@@ -30,7 +32,7 @@ def compute_sinusoidal_pe(pos_tensor: Tensor) -> Tensor:
     """
     scale = 2 * math.pi
     dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (dim_t // 2) / 128)
+    dim_t = temperature ** (2 * (dim_t // 2) / 128)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
     pos_x = x_embed[:, :, None] / dim_t

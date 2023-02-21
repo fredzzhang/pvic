@@ -502,8 +502,6 @@ class TransformerDecoder(nn.Module):
                 q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_padding_mask,
                 q_pos=q_pos, kv_pos=kv_pos,
-                return_q_attn_weights=return_q_attn_weights,
-                return_qk_attn_weights=return_qk_attn_weights
             )
             if self.return_intermediate:
                 intermediate.append(self.norm(outputs[0]))

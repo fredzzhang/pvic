@@ -412,9 +412,7 @@ class TransformerDecoderLayer(nn.Module):
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
             q_pos: Optional[Tensor] = None,
-            kv_pos: Optional[Tensor] = None,
-            return_q_attn_weights: Optional[bool] = False,
-            return_qk_attn_weights: Optional[bool] = False
+            kv_pos: Optional[Tensor] = None
         ):
         """
         Parameters:
@@ -437,16 +435,11 @@ class TransformerDecoderLayer(nn.Module):
             Positional encodings for the interaction queries.
         kv_pos: Tensor, default: None
             Positional encodings for the image features.
-        return_q_attn_weights: bool, default: False
-            If `True`, return the self attention weights.
-        return_qk_attn_weights: bool, default: False
-            If `True`, return the cross attention weights.
 
         Returns:
         --------
         outputs: list
-            A list with the order [queries, q_attn_w, qk_attn_w], if both weights are
-            to be returned.
+            A list with the order [queries, q_attn_w, qk_attn_w].
         """
         q = k = self.with_pos_embed(queries, q_pos)
         # Perform self attention amongst queries
@@ -465,11 +458,7 @@ class TransformerDecoderLayer(nn.Module):
         queries = self.ln2(queries + self.dp2(qk_attn))
         queries = self.ln3(queries + self.dp3(self.ffn(queries)))
 
-        outputs = [queries,]
-        if return_q_attn_weights:
-            outputs.append(q_attn_weights)
-        if return_qk_attn_weights:
-            outputs.append(qk_attn_weights)
+        outputs = [queries, q_attn_weights, qk_attn_weights]
         return outputs
 
 class TransformerDecoder(nn.Module):

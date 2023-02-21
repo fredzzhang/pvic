@@ -27,10 +27,7 @@ from pocket.core import DistributedLearningEngine
 from pocket.utils import DetectionAPMeter, BoxPairAssociation
 
 from ops import recover_boxes
-
-import sys
-sys.path.append('detr')
-import datasets.transforms as T
+from detr.datasets import transforms as T
 
 def custom_collate(batch):
     images = []

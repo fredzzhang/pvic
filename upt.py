@@ -18,6 +18,7 @@ from torch import nn, Tensor
 from typing import Optional, List, Tuple
 from collections import OrderedDict
 from swint import SwinTransformerBlockV2
+from attention import MultiheadAttention
 from torchvision.ops import FeaturePyramidNetwork
 
 from ops import (
@@ -384,7 +385,7 @@ class TransformerDecoderLayer(nn.Module):
         self.ffn_interm_dim = ffn_interm_dim
 
         self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        self.qk_attn = nn.MultiheadAttention(
+        self.qk_attn = MultiheadAttention(
             q_dim, num_heads,
             kdim=kv_dim, vdim=kv_dim,
             dropout=dropout

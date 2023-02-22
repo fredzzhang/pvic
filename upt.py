@@ -585,7 +585,7 @@ class UPT(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
-        self.q_p_proj = nn.Linear(self.transformer.d_model, repr_size)
+        self.q_p_proj = nn.Linear(self.transformer.d_model * 2, repr_size)
 
         self.repr_size = repr_size
         self.human_idx = human_idx
@@ -664,7 +664,8 @@ class UPT(nn.Module):
             ref = (bx[:, :2] + bx[:, 2:]) / 2
             ref /= torch.stack([w, h])
             pe = compute_sinusoidal_pe(ref[:, None])
-            pe = self.q_p_proj(pe)[p[:, 0]]
+            pe = torch.cat(pe[p].split(1, dim=1), dim=-1)
+            pe = self.q_p_proj(pe).squeeze(1)
             q_pos.append(pe)
         return q_pos
 

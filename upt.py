@@ -26,12 +26,11 @@ from ops import (
     prepare_region_proposals,
     associate_with_ground_truth,
     compute_prior_scores,
-    pad_queries
+    compute_sinusoidal_pe
 )
 
 from detr.models import build_model
 from detr.util.misc import nested_tensor_from_tensor_list
-
 
 class MultiModalFusion(nn.Module):
     def __init__(self, fst_mod_size, scd_mod_size, repr_size):
@@ -586,6 +585,8 @@ class UPT(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
+        self.q_p_proj = nn.Linear(self.transformer.d_model, repr_size)
+
         self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
@@ -656,6 +657,16 @@ class UPT(nn.Module):
             ))
 
         return detections
+
+    def compute_query_pe(self, boxes, p_inds, image_sizes):
+        q_pos = []
+        for bx, p, (h, w) in zip(boxes, p_inds, image_sizes):
+            ref = (bx[:, :2] + bx[:, 2:]) / 2
+            ref /= torch.stack([w, h])
+            pe = compute_sinusoidal_pe(ref[:, None])
+            pe = self.q_p_proj(pe)[p[:, 0]]
+            q_pos.append(pe)
+        return q_pos
 
     def forward(self,
         images: List[Tensor],
@@ -736,6 +747,7 @@ class UPT(nn.Module):
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
         kv_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        q_pos = self.compute_query_pe(boxes, paired_inds, image_sizes)
 
         output_queries = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
@@ -743,6 +755,7 @@ class UPT(nn.Module):
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
+                q_pos=q_pos[i],
                 kv_pos=kv_pos[i]
             )[0].squeeze(dim=2))
         mm_queries_collate = torch.cat(output_queries, dim=1)

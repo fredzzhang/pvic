@@ -509,18 +509,10 @@ class TransformerDecoder(nn.Module):
         # Add support for zero layers
         if self.num_layers == 0:
             return [queries.unsqueeze(0),]
-<<<<<<< HEAD
-        # Skip images without valid pairs
-        if queries.numel() == 0:
-            rp = self.num_layers if self.return_intermediate else 1
-            return [queries.unsqueeze(0).repeat(rp, 1, 1, 1),]
-=======
         # Explicitly handle zero-size queries
         if queries.numel() == 0:
             rp = self.num_layers if self.return_intermediate else 1
             return [queries.unsqueeze(0).repeat(rp, 1, 1, 1),]
-
->>>>>>> main
 
         outputs = [queries,]
         intermediate = []

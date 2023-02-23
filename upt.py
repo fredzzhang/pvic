@@ -31,7 +31,8 @@ from ops import (
 )
 
 from detr.models import build_model
-from detr.util.misc import nested_tensor_from_tensor_list
+from detr.util.misc import nested_tensor_from_tensor_list, NestedTensor
+from detr.models.position_encoding import PositionEmbeddingSine
 
 class MultiModalFusion(nn.Module):
     def __init__(self, fst_mod_size, scd_mod_size, repr_size):
@@ -610,6 +611,7 @@ class UPT(nn.Module):
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
         self.kv_dim = self.transformer.d_model
+        self.kv_pe = PositionEmbeddingSine(self.kv_dim // 2, temperature=20, normalize=True)
         self.h_ref_anchor_head = nn.Sequential(
             nn.Linear(repr_size, repr_size), nn.ReLU(),
             nn.Linear(repr_size, 2)
@@ -700,7 +702,7 @@ class UPT(nn.Module):
 
             bh_wh, bo_wh = b_wh[p].unbind(1)
 
-            pe = compute_sinusoidal_pe(bx_c[:, None])
+            pe = compute_sinusoidal_pe(bx_c[:, None], temperature=20)
             pe = pe[p].squeeze(2)   # n_query, 2, kv_dim
 
             # Modulate the positional embeddings with box widths and heights by
@@ -795,7 +797,8 @@ class UPT(nn.Module):
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
-        k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        # k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
         q_pos = self.compute_query_pe(boxes, paired_inds, ho_queries, image_sizes)
 
         output_queries = []

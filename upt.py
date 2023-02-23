@@ -231,49 +231,6 @@ class HumanObjectMatcher(nn.Module):
 
         return ho_queries, paired_indices, prior_scores, object_types
 
-class VerbMatcher(nn.Module):
-    def __init__(self, repr_size, triplet_to_obj, triplet_embeds, num_objs=80):
-        super().__init__()
-        self.repr_size = repr_size
-        self.triplet_to_obj = triplet_to_obj
-        self.num_objs = num_objs
-        self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
-
-        self.mmf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
-    def forward(self, ho_queries, object_types, triplet_cands):
-        device = ho_queries[0].device
-
-        mm_queries = []
-        dup_indices = []
-        triplet_indices = []
-        for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
-            obj_to_triplet = [[] for _ in range(self.num_objs)]
-            # Create an object-to-triplet mapping from the candidates
-            for t in t_cands:
-                obj_to_triplet[self.triplet_to_obj[t.item()]].append(t.item())
-            # Retrieve matched triplets and indices for duplicating ho pairs
-            matched_vb = torch.as_tensor([
-                (i, t) for i, o in enumerate(objs)
-                for t in obj_to_triplet[o.item()]
-            ], device=device)
-
-            # Handle images without valid ho pairs
-            if len(matched_vb) == 0:
-                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
-                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                triplet_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                continue
-
-            dup_inds, t_inds = matched_vb.unbind(1)
-
-            mm_queries.append(self.mmf(
-                ho_q[dup_inds], self.triplet_embeds[t_inds]
-            ))
-            dup_indices.append(dup_inds)
-            triplet_indices.append(t_inds)
-
-        return mm_queries, dup_indices, triplet_indices
-
 class SwinTransformer(nn.Module):
 
     def __init__(self, dim, num_layers):

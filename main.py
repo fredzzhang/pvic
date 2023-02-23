@@ -127,8 +127,12 @@ def sanity_check(args):
     upt = build_detector(args, object_to_target)
     if args.eval:
         upt.eval()
+    if os.path.exists(args.resume):
+        ckpt = torch.load(args.resume, map_location='cpu')
+        print(f"Loading checkpoints from {args.resume}.")
+        upt.load_state_dict(ckpt['model_state_dict'])
 
-    image, target = dataset[0]
+    image, target = dataset[998]
     outputs = upt([image], targets=[target])
 
 if __name__ == '__main__':

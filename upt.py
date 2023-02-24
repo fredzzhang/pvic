@@ -10,12 +10,11 @@ Microsoft Research Asia
 import os
 import copy
 import torch
-import pocket
 import torch.nn.functional as F
 import torch.distributed as dist
 
 from torch import nn, Tensor
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from collections import OrderedDict
 from swint import SwinTransformerBlockV2
 from attention import MultiheadAttention
@@ -23,7 +22,6 @@ from torchvision.ops import FeaturePyramidNetwork
 
 from ops import (
     binary_focal_loss_with_logits,
-    compute_spatial_encodings,
     prepare_region_proposals,
     associate_with_ground_truth,
     compute_prior_scores,
@@ -124,17 +122,14 @@ class HumanObjectMatcher(nn.Module):
         self.human_idx = human_idx
         self.obj_to_verb = obj_to_verb
 
-        self.spatial_head = nn.Sequential(
-            nn.Linear(36, 128), nn.ReLU(),
-            nn.Linear(128, 256), nn.ReLU(),
-            nn.Linear(256, repr_size), nn.ReLU(),
-        )
         self.ref_anchor_head = nn.Sequential(
             nn.Linear(256, 256), nn.ReLU(),
             nn.Linear(256, 2)
         )
         self.encoder = TransformerEncoder(num_layers=2)
-        self.mmf = MultiModalFusion(512, repr_size, repr_size)
+        self.query_head = nn.Sequential(
+            nn.Linear(512, repr_size), nn.LayerNorm(repr_size)
+        )
 
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
@@ -170,7 +165,7 @@ class HumanObjectMatcher(nn.Module):
         paired_indices = []
         prior_scores = []
         object_types = []
-        centre_pe = []
+        positional_embeds = []
         for i, rp in enumerate(region_props):
             boxes, scores, labels, embeds = rp.values()
             nh = self.check_human_instances(labels)
@@ -187,24 +182,14 @@ class HumanObjectMatcher(nn.Module):
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
                 prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
-                centre_pe.append(torch.zeros(0, 256, device=device))
+                positional_embeds.append({})
                 continue
-            x = x.flatten(); y = y.flatten()
-            # Compute spatial features
-            pairwise_spatial = compute_spatial_encodings(
-                [boxes[x],], [boxes[y],], [image_sizes[i],]
-            )
-            pairwise_spatial = self.spatial_head(pairwise_spatial)
-            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
 
             box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
             embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
             embeds = embeds.squeeze(1)
             # Compute human-object queries
-            ho_q = self.mmf(
-                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
-                pairwise_spatial_reshaped[x_keep, y_keep]
-            )
+            ho_q = self.query_head(torch.cat([embeds[x_keep], embeds[y_keep]], dim=1))
             # Append matched human-object pairs
             ho_queries.append(ho_q)
             paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
@@ -213,11 +198,12 @@ class HumanObjectMatcher(nn.Module):
                 self.obj_to_verb
             ))
             object_types.append(labels[y_keep])
-            centre_pe.append(torch.cat([
-                c_pe[x_keep], c_pe[y_keep]
-            ], dim=-1))
+            positional_embeds.append({
+                "centre": torch.cat([c_pe[x_keep], c_pe[y_keep]], dim=-1).unsqueeze(1),
+                "box": torch.cat([box_pe[x_keep], box_pe[y_keep]], dim=-1).unsqueeze(1)
+            })
 
-        return ho_queries, paired_indices, prior_scores, object_types, centre_pe
+        return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
 
 class SwinTransformer(nn.Module):
 
@@ -329,10 +315,18 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
 
-        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        # Linear projections on qkv have been removed in this custom layer
+        # Linear projections on qkv have been removed in this custom layer.
+        self.q_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
+        # Add the missing linear projections.
+        self.q_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_k_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_v_proj = nn.Linear(q_dim, q_dim)
+        # Each scalar is mapped to a vector of shape kv_dim // 2.
+        # For a box pair, the dimension is 8 * (kv_dim // 2).
+        self.q_attn_qpos_proj = nn.Linear(kv_dim * 4, q_dim)
+        self.q_attn_kpos_proj = nn.Linear(kv_dim * 4, q_dim)
+
         self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
-        # Add the missing linear projections
         self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)
         self.qk_attn_k_proj = nn.Linear(kv_dim, q_dim)
         self.qk_attn_v_proj = nn.Linear(kv_dim, q_dim)
@@ -351,9 +345,6 @@ class TransformerDecoderLayer(nn.Module):
         self.dp1 = nn.Dropout(dropout)
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
-
-    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
-        return tensor if pos is None else tensor + pos
 
     def forward(self,
             queries: Tensor, features: Tensor,
@@ -390,11 +381,16 @@ class TransformerDecoderLayer(nn.Module):
         outputs: list
             A list with the order [queries, q_attn_w, qk_attn_w].
         """
-        # Remove positional embeddings in self-attention
-        q = k = queries
         # Perform self attention amongst queries
+        q = self.q_attn_q_proj(queries)
+        k = self.q_attn_k_proj(queries)
+        v = self.q_attn_v_proj(queries)
+        q_p = self.q_attn_qpos_proj(q_pos["box"])
+        k_p = self.q_attn_kpos_proj(q_pos["box"])
+        q = q + q_p
+        k = k + k_p
         q_attn, q_attn_weights = self.q_attn(
-            q, k, value=queries, attn_mask=q_mask,
+            q, k, value=v, attn_mask=q_mask,
             key_padding_mask=q_padding_mask
         )
         queries = self.ln1(queries + self.dp1(q_attn))
@@ -402,21 +398,21 @@ class TransformerDecoderLayer(nn.Module):
         q = self.qk_attn_q_proj(queries)
         k = self.qk_attn_k_proj(features)
         v = self.qk_attn_v_proj(features)
-        q_pos = self.qk_attn_qpos_proj(q_pos)
-        k_pos = self.qk_attn_kpos_proj(k_pos)
+        q_p = self.qk_attn_qpos_proj(q_pos["centre"])
+        k_p = self.qk_attn_kpos_proj(k_pos)
 
         n_q, bs, _ = q.shape
         q = q.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
-        q_pos = q_pos.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
-        q = torch.cat([q, q_pos], dim=3).view(n_q, bs, self.q_dim * 2)
+        q_p = q_p.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim * 2)
 
         hw, _, _ = k.shape
         k = k.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k_pos = k_pos.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k = torch.cat([k, k_pos], dim=3).view(hw, bs, self.q_dim * 2)
+        k_p = k_p.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k = torch.cat([k, k_p], dim=3).view(hw, bs, self.q_dim * 2)
 
         qk_attn, qk_attn_weights = self.qk_attn(
-            query=q, key=k, value=v,
+            query=q, key=k, value=v, attn_mask=kv_mask,
             key_padding_mask=kv_padding_mask
         )
         queries = self.ln2(queries + self.dp2(qk_attn))
@@ -692,7 +688,7 @@ class UPT(nn.Module):
         )
         boxes = [r['boxes'] for r in region_props]
 
-        ho_queries, paired_inds, prior_scores, object_types, centre_pe = self.ho_matcher(
+        ho_queries, paired_inds, prior_scores, object_types, positional_embeds = self.ho_matcher(
             region_props, image_sizes
         )
         # if triplet_cands is None:
@@ -713,7 +709,7 @@ class UPT(nn.Module):
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
-                q_pos=centre_pe[i].unsqueeze(1),
+                q_pos=positional_embeds[i],
                 k_pos=k_pos[i]
             )[0].squeeze(dim=2))
         mm_queries_collate = torch.cat(output_queries, dim=1)

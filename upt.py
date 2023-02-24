@@ -18,6 +18,7 @@ from torch import nn, Tensor
 from typing import Optional, List, Tuple
 from collections import OrderedDict
 from swint import SwinTransformerBlockV2
+from attention import MultiheadAttention
 from torchvision.ops import FeaturePyramidNetwork
 
 from ops import (
@@ -26,12 +27,11 @@ from ops import (
     prepare_region_proposals,
     associate_with_ground_truth,
     compute_prior_scores,
-    pad_queries
+    compute_sinusoidal_pe
 )
 
 from detr.models import build_model
 from detr.util.misc import nested_tensor_from_tensor_list
-
 
 class MultiModalFusion(nn.Module):
     def __init__(self, fst_mod_size, scd_mod_size, repr_size):
@@ -231,49 +231,6 @@ class HumanObjectMatcher(nn.Module):
 
         return ho_queries, paired_indices, prior_scores, object_types
 
-class VerbMatcher(nn.Module):
-    def __init__(self, repr_size, triplet_to_obj, triplet_embeds, num_objs=80):
-        super().__init__()
-        self.repr_size = repr_size
-        self.triplet_to_obj = triplet_to_obj
-        self.num_objs = num_objs
-        self.register_buffer("triplet_embeds", triplet_embeds.type(torch.float32))
-
-        self.mmf = MultiModalFusion(repr_size, triplet_embeds.shape[1], repr_size)
-    def forward(self, ho_queries, object_types, triplet_cands):
-        device = ho_queries[0].device
-
-        mm_queries = []
-        dup_indices = []
-        triplet_indices = []
-        for ho_q, objs, t_cands in zip(ho_queries, object_types, triplet_cands):
-            obj_to_triplet = [[] for _ in range(self.num_objs)]
-            # Create an object-to-triplet mapping from the candidates
-            for t in t_cands:
-                obj_to_triplet[self.triplet_to_obj[t.item()]].append(t.item())
-            # Retrieve matched triplets and indices for duplicating ho pairs
-            matched_vb = torch.as_tensor([
-                (i, t) for i, o in enumerate(objs)
-                for t in obj_to_triplet[o.item()]
-            ], device=device)
-
-            # Handle images without valid ho pairs
-            if len(matched_vb) == 0:
-                mm_queries.append(torch.zeros(0, self.repr_size, device=device))
-                dup_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                triplet_indices.append(torch.zeros(0, device=device, dtype=torch.long))
-                continue
-
-            dup_inds, t_inds = matched_vb.unbind(1)
-
-            mm_queries.append(self.mmf(
-                ho_q[dup_inds], self.triplet_embeds[t_inds]
-            ))
-            dup_indices.append(dup_inds)
-            triplet_indices.append(t_inds)
-
-        return mm_queries, dup_indices, triplet_indices
-
 class SwinTransformer(nn.Module):
 
     def __init__(self, dim, num_layers):
@@ -385,11 +342,15 @@ class TransformerDecoderLayer(nn.Module):
         self.ffn_interm_dim = ffn_interm_dim
 
         self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        self.qk_attn = nn.MultiheadAttention(
-            q_dim, num_heads,
-            kdim=kv_dim, vdim=kv_dim,
-            dropout=dropout
-        )
+        # Linear projects on qkv have been removed in this custom layer
+        self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
+        # Add the missing linear projections
+        self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.qk_attn_k_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_v_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_kpos_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_qpos_proj = nn.Linear(kv_dim * 2, q_dim)
+
         self.ffn = nn.Sequential(
             nn.Linear(q_dim, ffn_interm_dim),
             nn.ReLU(),
@@ -406,13 +367,13 @@ class TransformerDecoderLayer(nn.Module):
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
 
-    def forward(self, queries, features,
+    def forward(self,
+            queries: Tensor, features: Tensor,
+            q_pos: Tensor, k_pos: Tensor,
             q_mask: Optional[Tensor] = None,
             kv_mask: Optional[Tensor] = None,
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
-            q_pos: Optional[Tensor] = None,
-            kv_pos: Optional[Tensor] = None
         ):
         """
         Parameters:
@@ -420,7 +381,7 @@ class TransformerDecoderLayer(nn.Module):
         queries: Tensor
             Interaction queries of size (B, N, K).
         features: Tensor
-            Image features of size (B, C, H, W).
+            Image features of size (HW, B, C).
         q_mask: Tensor, default: None
             Attention mask to be applied during the self attention of queries.
         kv_mask: Tensor, default: None
@@ -433,7 +394,7 @@ class TransformerDecoderLayer(nn.Module):
             Padding mask for image features of size (B, HW).
         q_pos: Tensor, default: None
             Positional encodings for the interaction queries.
-        kv_pos: Tensor, default: None
+        k_pos: Tensor, default: None
             Positional encodings for the image features.
 
         Returns:
@@ -441,7 +402,8 @@ class TransformerDecoderLayer(nn.Module):
         outputs: list
             A list with the order [queries, q_attn_w, qk_attn_w].
         """
-        q = k = self.with_pos_embed(queries, q_pos)
+        # Remove positional embeddings in self-attention
+        q = k = queries
         # Perform self attention amongst queries
         q_attn, q_attn_weights = self.q_attn(
             q, k, value=queries, attn_mask=q_mask,
@@ -449,10 +411,24 @@ class TransformerDecoderLayer(nn.Module):
         )
         queries = self.ln1(queries + self.dp1(q_attn))
         # Perform cross attention from memory features to queries
+        q = self.qk_attn_q_proj(queries)
+        k = self.qk_attn_k_proj(features)
+        v = self.qk_attn_v_proj(features)
+        q_pos = self.qk_attn_qpos_proj(q_pos)
+        k_pos = self.qk_attn_kpos_proj(k_pos)
+
+        n_q, bs, _ = q.shape
+        q = q.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q_pos = q_pos.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q = torch.cat([q, q_pos], dim=3).view(n_q, bs, self.q_dim * 2)
+
+        hw, _, _ = k.shape
+        k = k.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k_pos = k_pos.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k = torch.cat([k, k_pos], dim=3).view(hw, bs, self.q_dim * 2)
+
         qk_attn, qk_attn_weights = self.qk_attn(
-            query=self.with_pos_embed(queries, q_pos),
-            key=self.with_pos_embed(features, kv_pos),
-            value=features, attn_mask=kv_mask,
+            query=q, key=k, value=v,
             key_padding_mask=kv_padding_mask
         )
         queries = self.ln2(queries + self.dp2(qk_attn))
@@ -483,7 +459,7 @@ class TransformerDecoder(nn.Module):
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
             q_pos: Optional[Tensor] = None,
-            kv_pos: Optional[Tensor] = None,
+            k_pos: Optional[Tensor] = None,
             return_q_attn_weights: Optional[bool] = False,
             return_qk_attn_weights: Optional[bool] = False
         ):
@@ -495,7 +471,6 @@ class TransformerDecoder(nn.Module):
             rp = self.num_layers if self.return_intermediate else 1
             return [queries.unsqueeze(0).repeat(rp, 1, 1, 1),]
 
-
         outputs = [queries,]
         intermediate = []
         q_attn_w = []
@@ -506,7 +481,7 @@ class TransformerDecoder(nn.Module):
                 q_mask=q_mask, kv_mask=kv_mask,
                 q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_padding_mask,
-                q_pos=q_pos, kv_pos=kv_pos,
+                q_pos=q_pos, k_pos=k_pos,
             )
             if self.return_intermediate:
                 intermediate.append(self.norm(outputs[0]))
@@ -591,6 +566,16 @@ class UPT(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
+        self.kv_dim = self.transformer.d_model
+        self.h_ref_anchor_head = nn.Sequential(
+            nn.Linear(repr_size, repr_size), nn.ReLU(),
+            nn.Linear(repr_size, 2)
+        )
+        self.o_ref_anchor_head = nn.Sequential(
+            nn.Linear(repr_size, repr_size), nn.ReLU(),
+            nn.Linear(repr_size, 2)
+        )
+
         self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
@@ -661,6 +646,33 @@ class UPT(nn.Module):
             ))
 
         return detections
+
+    def compute_query_pe(self, boxes, p_inds, ho_queries, image_sizes):
+        q_pos = []
+        for bx, p, ho_q, (h, w) in zip(boxes, p_inds, ho_queries, image_sizes):
+            bx_c = (bx[:, :2] + bx[:, 2:]) / 2
+            bx_c /= torch.stack([w, h])
+            b_wh = bx[:, 2:] - bx[:, :2]
+            b_wh /= torch.stack([w, h])
+
+            bh_wh, bo_wh = b_wh[p].unbind(1)
+
+            pe = compute_sinusoidal_pe(bx_c[:, None])
+            pe = pe[p].squeeze(2)   # n_query, 2, kv_dim
+
+            # Modulate the positional embeddings with box widths and heights by
+            # applying different temperatures to x and y
+            hum_ref_hw_cond = self.h_ref_anchor_head(ho_q).sigmoid()    # n_query, 2
+            obj_ref_hw_cond = self.o_ref_anchor_head(ho_q).sigmoid()
+            # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+            pe[:, 0, :self.kv_dim // 2] *= (hum_ref_hw_cond[:, 1] / bh_wh[:, 1]).unsqueeze(-1)
+            pe[:, 0, self.kv_dim // 2:] *= (hum_ref_hw_cond[:, 0] / bh_wh[:, 0]).unsqueeze(-1)
+            pe[:, 1, :self.kv_dim // 2] *= (obj_ref_hw_cond[:, 1] / bo_wh[:, 1]).unsqueeze(-1)
+            pe[:, 1, self.kv_dim // 2:] *= (obj_ref_hw_cond[:, 0] / bo_wh[:, 0]).unsqueeze(-1)
+
+            # Concatenate pe for human and object boxes at the last dimension
+            q_pos.append(pe.view(-1, self.kv_dim * 2))                  # n_query, kv_dim * 2
+        return q_pos
 
     def forward(self,
         images: List[Tensor],
@@ -740,7 +752,8 @@ class UPT(nn.Module):
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
-        kv_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        q_pos = self.compute_query_pe(boxes, paired_inds, ho_queries, image_sizes)
 
         output_queries = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
@@ -748,7 +761,8 @@ class UPT(nn.Module):
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
-                kv_pos=kv_pos[i]
+                q_pos=q_pos[i].unsqueeze(1),
+                k_pos=k_pos[i]
             )[0].squeeze(dim=2))
         mm_queries_collate = torch.cat(output_queries, dim=1)
         # mm_queries_collate = torch.cat([

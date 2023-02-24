@@ -55,106 +55,64 @@ class MultiModalFusion(nn.Module):
         z = self.mlp(z)
         return z
 
-class ModifiedEncoderLayer(nn.Module):
-    def __init__(self,
-        hidden_size: int, repr_size: int,
-        num_heads: int = 8, dropout_prob: float = .1, return_weights: bool = False,
-    ) -> None:
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, dim, num_heads, ffn_interm_dim, dropout=0.1):
         super().__init__()
-        if repr_size % num_heads != 0:
-            raise ValueError(
-                f"The given representation size {repr_size} "
-                f"should be divisible by the number of attention heads {num_heads}."
-            )
-        self.sub_repr_size = int(repr_size / num_heads)
-
-        self.hidden_size = hidden_size
-        self.repr_size = repr_size
-
+        self.dim = dim
         self.num_heads = num_heads
-        self.return_weights = return_weights
-
-        self.unary = nn.Linear(hidden_size, repr_size)
-        self.pairwise = nn.Linear(repr_size, repr_size)
-        self.attn = nn.ModuleList([nn.Linear(3 * self.sub_repr_size, 1) for _ in range(num_heads)])
-        self.message = nn.ModuleList([nn.Linear(self.sub_repr_size, self.sub_repr_size) for _ in range(num_heads)])
-        self.aggregate = nn.Linear(repr_size, hidden_size)
-        self.norm = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout_prob)
-
-        self.ffn = pocket.models.FeedForwardNetwork(hidden_size, hidden_size * 4, dropout_prob)
-
-    def reshape(self, x: Tensor) -> Tensor:
-        new_x_shape = x.size()[:-1] + (
-            self.num_heads,
-            self.sub_repr_size
+        self.dropout = dropout
+        self.ffn_interm_dim = ffn_interm_dim
+        # Linear projections on qkv have been removed in this custom layer.
+        self.attn = MultiheadAttention(dim, num_heads, dropout=dropout)
+        # Add the missing linear projections.
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        # The positional embeddings include box centres, widths and heights,
+        # which will be twice the representation size.
+        self.qpos_proj = nn.Linear(2 * dim, dim)
+        self.kpos_proj = nn.Linear(2 * dim, dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, dim)
         )
-        x = x.view(*new_x_shape)
-        if len(new_x_shape) == 3:
-            return x.permute(1, 0, 2)
-        elif len(new_x_shape) == 4:
-            return x.permute(2, 0, 1, 3)
-        else:
-            raise ValueError("Incorrect tensor shape")
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
 
-    def forward(self, x: Tensor, y: Tensor) -> Tuple[Tensor, Optional[Tensor]]:
-        device = x.device
-        n = len(x)
+    def forward(self, x, pos,
+            attn_mask: Optional[Tensor] = None,
+            key_padding_mask: Optional[Tensor] = None,
+        ):
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        q_pos = self.qpos_proj(pos)
+        k_pos = self.kpos_proj(pos)
+        q = q + q_pos
+        k = k + k_pos
+        attn, attn_weights = self.attn(
+            query=q, key=k, value=v,
+            attn_mask=attn_mask, key_padding_mask=key_padding_mask
+        )
+        x = self.ln1(x + self.dp1(attn))
+        x = self.ln2(x + self.dp2(self.ffn(x)))
+        return x, attn_weights
 
-        u = F.relu(self.unary(x))
-        p = F.relu(self.pairwise(y))
-
-        # Unary features (H, N, L)
-        u_r = self.reshape(u)
-        # Pairwise features (H, N, N, L)
-        p_r = self.reshape(p)
-
-        i, j = torch.meshgrid(torch.arange(n, device=device), torch.arange(n, device=device))
-        # Features used to compute attention (H, N, N, 3L)
-        attn_features = torch.cat([u_r[:, i], u_r[:, j], p_r], dim=-1)
-        # Attention weights (H,) (N, N, 1)
-        weights = [
-            F.softmax(l(f), dim=0) for f, l
-            in zip(attn_features, self.attn)
-        ]
-        # Repeated unary feaures along the third dimension (H, N, N, L)
-        u_r_repeat = u_r.unsqueeze(dim=2).repeat(1, 1, n, 1)
-        messages = [
-            l(f_1 * f_2) for f_1, f_2, l
-            in zip(u_r_repeat, p_r, self.message)
-        ]
-        aggregated_messages = self.aggregate(F.relu(
-            torch.cat([
-                (w * m).sum(dim=0) for w, m
-                in zip(weights, messages)
-            ], dim=-1)
-        ))
-        aggregated_messages = self.dropout(aggregated_messages)
-        x = self.norm(x + aggregated_messages)
-        x = self.ffn(x)
-
-        if self.return_weights: attn = weights
-        else: attn = None
-
-        return x, attn
-
-class ModifiedEncoder(nn.Module):
-    def __init__(self,
-        hidden_size: int = 256, repr_size: int = 384,
-        num_heads: int = 8, num_layers: int = 2,
-        dropout_prob: float = .1, return_weights: bool = False,
-    ) -> None:
+class TransformerEncoder(nn.Module):
+    def __init__(self, hidden_size=256, num_heads=8, num_layers=2, dropout=.1):
         super().__init__()
         self.num_layers = num_layers
-        self.mod_enc = nn.ModuleList([ModifiedEncoderLayer(
-            hidden_size=hidden_size, repr_size=repr_size,
-            num_heads=num_heads, dropout_prob=dropout_prob, return_weights=return_weights
+        self.layers = nn.ModuleList([TransformerEncoderLayer(
+            dim=hidden_size, num_heads=num_heads,
+            ffn_interm_dim=hidden_size * 4, dropout=dropout
         ) for _ in range(num_layers)])
 
-    def forward(self, x: Tensor, y: Tensor) -> Tuple[Tensor, List[Optional[Tensor]]]:
+    def forward(self, x, pos):
         attn_weights = []
-        for layer in self.mod_enc:
-            x, attn = layer(x, y)
+        for layer in self.layers:
+            x, attn = layer(x, pos)
             attn_weights.append(attn)
         return x, attn_weights
 
@@ -175,7 +133,7 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(256, 256), nn.ReLU(),
             nn.Linear(256, 2)
         )
-        self.encoder = ModifiedEncoder(256, repr_size, num_layers=2)
+        self.encoder = TransformerEncoder(num_layers=2)
         self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
@@ -239,9 +197,9 @@ class HumanObjectMatcher(nn.Module):
             pairwise_spatial = self.spatial_head(pairwise_spatial)
             pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
 
-            _, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
-
-            embeds, _ = self.encoder(embeds, pairwise_spatial_reshaped)
+            box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
+            embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
+            embeds = embeds.squeeze(1)
             # Compute human-object queries
             ho_q = self.mmf(
                 torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
@@ -372,7 +330,7 @@ class TransformerDecoderLayer(nn.Module):
         self.ffn_interm_dim = ffn_interm_dim
 
         self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        # Linear projects on qkv have been removed in this custom layer
+        # Linear projections on qkv have been removed in this custom layer
         self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
         # Add the missing linear projections
         self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)

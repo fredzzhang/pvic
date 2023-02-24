@@ -171,6 +171,10 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(128, 256), nn.ReLU(),
             nn.Linear(256, repr_size), nn.ReLU(),
         )
+        self.ref_anchor_head = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 2)
+        )
         self.encoder = ModifiedEncoder(256, repr_size, num_layers=2)
         self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
@@ -181,6 +185,25 @@ class HumanObjectMatcher(nn.Module):
             raise AssertionError("Human instances are not permuted to the top!")
         return n_h
 
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None]).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None]).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+
     def forward(self, region_props, image_sizes, device=None):
         if device is None:
             device = region_props[0]["hidden_states"].device
@@ -189,6 +212,7 @@ class HumanObjectMatcher(nn.Module):
         paired_indices = []
         prior_scores = []
         object_types = []
+        centre_pe = []
         for i, rp in enumerate(region_props):
             boxes, scores, labels, embeds = rp.values()
             nh = self.check_human_instances(labels)
@@ -205,6 +229,7 @@ class HumanObjectMatcher(nn.Module):
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
                 prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                centre_pe.append(torch.zeros(0, 256, device=device))
                 continue
             x = x.flatten(); y = y.flatten()
             # Compute spatial features
@@ -213,6 +238,8 @@ class HumanObjectMatcher(nn.Module):
             )
             pairwise_spatial = self.spatial_head(pairwise_spatial)
             pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
+
+            _, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
 
             embeds, _ = self.encoder(embeds, pairwise_spatial_reshaped)
             # Compute human-object queries
@@ -228,8 +255,11 @@ class HumanObjectMatcher(nn.Module):
                 self.obj_to_verb
             ))
             object_types.append(labels[y_keep])
+            centre_pe.append(torch.cat([
+                c_pe[x_keep], c_pe[y_keep]
+            ], dim=-1))
 
-        return ho_queries, paired_indices, prior_scores, object_types
+        return ho_queries, paired_indices, prior_scores, object_types, centre_pe
 
 class SwinTransformer(nn.Module):
 
@@ -566,16 +596,6 @@ class UPT(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
-        self.kv_dim = self.transformer.d_model
-        self.h_ref_anchor_head = nn.Sequential(
-            nn.Linear(repr_size, repr_size), nn.ReLU(),
-            nn.Linear(repr_size, 2)
-        )
-        self.o_ref_anchor_head = nn.Sequential(
-            nn.Linear(repr_size, repr_size), nn.ReLU(),
-            nn.Linear(repr_size, 2)
-        )
-
         self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
@@ -647,33 +667,6 @@ class UPT(nn.Module):
 
         return detections
 
-    def compute_query_pe(self, boxes, p_inds, ho_queries, image_sizes):
-        q_pos = []
-        for bx, p, ho_q, (h, w) in zip(boxes, p_inds, ho_queries, image_sizes):
-            bx_c = (bx[:, :2] + bx[:, 2:]) / 2
-            bx_c /= torch.stack([w, h])
-            b_wh = bx[:, 2:] - bx[:, :2]
-            b_wh /= torch.stack([w, h])
-
-            bh_wh, bo_wh = b_wh[p].unbind(1)
-
-            pe = compute_sinusoidal_pe(bx_c[:, None])
-            pe = pe[p].squeeze(2)   # n_query, 2, kv_dim
-
-            # Modulate the positional embeddings with box widths and heights by
-            # applying different temperatures to x and y
-            hum_ref_hw_cond = self.h_ref_anchor_head(ho_q).sigmoid()    # n_query, 2
-            obj_ref_hw_cond = self.o_ref_anchor_head(ho_q).sigmoid()
-            # Note that the positional embeddings are stacked as [pe(y), pe(x)]
-            pe[:, 0, :self.kv_dim // 2] *= (hum_ref_hw_cond[:, 1] / bh_wh[:, 1]).unsqueeze(-1)
-            pe[:, 0, self.kv_dim // 2:] *= (hum_ref_hw_cond[:, 0] / bh_wh[:, 0]).unsqueeze(-1)
-            pe[:, 1, :self.kv_dim // 2] *= (obj_ref_hw_cond[:, 1] / bo_wh[:, 1]).unsqueeze(-1)
-            pe[:, 1, self.kv_dim // 2:] *= (obj_ref_hw_cond[:, 0] / bo_wh[:, 0]).unsqueeze(-1)
-
-            # Concatenate pe for human and object boxes at the last dimension
-            q_pos.append(pe.view(-1, self.kv_dim * 2))                  # n_query, kv_dim * 2
-        return q_pos
-
     def forward(self,
         images: List[Tensor],
         triplet_cands: Optional[List[int]] = None,
@@ -741,7 +734,9 @@ class UPT(nn.Module):
         )
         boxes = [r['boxes'] for r in region_props]
 
-        ho_queries, paired_inds, prior_scores, object_types = self.ho_matcher(region_props, image_sizes)
+        ho_queries, paired_inds, prior_scores, object_types, centre_pe = self.ho_matcher(
+            region_props, image_sizes
+        )
         # if triplet_cands is None:
             # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
             # triplet_cands = [None for _ in range(len(boxes))]
@@ -753,7 +748,6 @@ class UPT(nn.Module):
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
         k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
-        q_pos = self.compute_query_pe(boxes, paired_inds, ho_queries, image_sizes)
 
         output_queries = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
@@ -761,7 +755,7 @@ class UPT(nn.Module):
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
-                q_pos=q_pos[i].unsqueeze(1),
+                q_pos=centre_pe[i].unsqueeze(1),
                 k_pos=k_pos[i]
             )[0].squeeze(dim=2))
         mm_queries_collate = torch.cat(output_queries, dim=1)

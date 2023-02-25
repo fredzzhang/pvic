@@ -10,12 +10,11 @@ Microsoft Research Asia
 import os
 import copy
 import torch
-import pocket
 import torch.nn.functional as F
 import torch.distributed as dist
 
 from torch import nn, Tensor
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from collections import OrderedDict
 from swint import SwinTransformerBlockV2
 from attention import MultiheadAttention
@@ -31,7 +30,8 @@ from ops import (
 )
 
 from detr.models import build_model
-from detr.util.misc import nested_tensor_from_tensor_list
+from detr.models.position_encoding import PositionEmbeddingSine
+from detr.util.misc import NestedTensor, nested_tensor_from_tensor_list
 
 class MultiModalFusion(nn.Module):
     def __init__(self, fst_mod_size, scd_mod_size, repr_size):
@@ -117,23 +117,23 @@ class TransformerEncoder(nn.Module):
         return x, attn_weights
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
         self.human_idx = human_idx
         self.obj_to_verb = obj_to_verb
 
+        self.ref_anchor_head = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 2)
+        )
         self.spatial_head = nn.Sequential(
             nn.Linear(36, 128), nn.ReLU(),
             nn.Linear(128, 256), nn.ReLU(),
             nn.Linear(256, repr_size), nn.ReLU(),
         )
-        self.ref_anchor_head = nn.Sequential(
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 2)
-        )
-        self.encoder = TransformerEncoder(num_layers=2)
+        self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
         self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
@@ -148,8 +148,8 @@ class HumanObjectMatcher(nn.Module):
         bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
         b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
 
-        c_pe = compute_sinusoidal_pe(bx_c[:, None]).squeeze(1)
-        wh_pe = compute_sinusoidal_pe(b_wh[:, None]).squeeze(1)
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
 
         box_pe = torch.cat([c_pe, wh_pe], dim=-1)
 
@@ -170,7 +170,7 @@ class HumanObjectMatcher(nn.Module):
         paired_indices = []
         prior_scores = []
         object_types = []
-        centre_pe = []
+        positional_embeds = []
         for i, rp in enumerate(region_props):
             boxes, scores, labels, embeds = rp.values()
             nh = self.check_human_instances(labels)
@@ -187,7 +187,7 @@ class HumanObjectMatcher(nn.Module):
                 paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
                 prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
-                centre_pe.append(torch.zeros(0, 256, device=device))
+                positional_embeds.append({})
                 continue
             x = x.flatten(); y = y.flatten()
             # Compute spatial features
@@ -213,11 +213,12 @@ class HumanObjectMatcher(nn.Module):
                 self.obj_to_verb
             ))
             object_types.append(labels[y_keep])
-            centre_pe.append(torch.cat([
-                c_pe[x_keep], c_pe[y_keep]
-            ], dim=-1))
+            positional_embeds.append({
+                "centre": torch.cat([c_pe[x_keep], c_pe[y_keep]], dim=-1).unsqueeze(1),
+                "box": torch.cat([box_pe[x_keep], box_pe[y_keep]], dim=-1).unsqueeze(1)
+            })
 
-        return ho_queries, paired_indices, prior_scores, object_types, centre_pe
+        return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
 
 class SwinTransformer(nn.Module):
 
@@ -329,10 +330,18 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
 
-        self.q_attn = nn.MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        # Linear projections on qkv have been removed in this custom layer
+        # Linear projections on qkv have been removed in this custom layer.
+        self.q_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
+        # Add the missing linear projections.
+        self.q_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_k_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_v_proj = nn.Linear(q_dim, q_dim)
+        # Each scalar is mapped to a vector of shape kv_dim // 2.
+        # For a box pair, the dimension is 8 * (kv_dim // 2).
+        self.q_attn_qpos_proj = nn.Linear(kv_dim * 4, q_dim)
+        self.q_attn_kpos_proj = nn.Linear(kv_dim * 4, q_dim)
+
         self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
-        # Add the missing linear projections
         self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)
         self.qk_attn_k_proj = nn.Linear(kv_dim, q_dim)
         self.qk_attn_v_proj = nn.Linear(kv_dim, q_dim)
@@ -351,9 +360,6 @@ class TransformerDecoderLayer(nn.Module):
         self.dp1 = nn.Dropout(dropout)
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
-
-    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
-        return tensor if pos is None else tensor + pos
 
     def forward(self,
             queries: Tensor, features: Tensor,
@@ -390,11 +396,16 @@ class TransformerDecoderLayer(nn.Module):
         outputs: list
             A list with the order [queries, q_attn_w, qk_attn_w].
         """
-        # Remove positional embeddings in self-attention
-        q = k = queries
         # Perform self attention amongst queries
+        q = self.q_attn_q_proj(queries)
+        k = self.q_attn_k_proj(queries)
+        v = self.q_attn_v_proj(queries)
+        q_p = self.q_attn_qpos_proj(q_pos["box"])
+        k_p = self.q_attn_kpos_proj(q_pos["box"])
+        q = q + q_p
+        k = k + k_p
         q_attn, q_attn_weights = self.q_attn(
-            q, k, value=queries, attn_mask=q_mask,
+            q, k, value=v, attn_mask=q_mask,
             key_padding_mask=q_padding_mask
         )
         queries = self.ln1(queries + self.dp1(q_attn))
@@ -402,21 +413,21 @@ class TransformerDecoderLayer(nn.Module):
         q = self.qk_attn_q_proj(queries)
         k = self.qk_attn_k_proj(features)
         v = self.qk_attn_v_proj(features)
-        q_pos = self.qk_attn_qpos_proj(q_pos)
-        k_pos = self.qk_attn_kpos_proj(k_pos)
+        q_p = self.qk_attn_qpos_proj(q_pos["centre"])
+        k_p = self.qk_attn_kpos_proj(k_pos)
 
         n_q, bs, _ = q.shape
         q = q.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
-        q_pos = q_pos.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
-        q = torch.cat([q, q_pos], dim=3).view(n_q, bs, self.q_dim * 2)
+        q_p = q_p.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim * 2)
 
         hw, _, _ = k.shape
         k = k.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k_pos = k_pos.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k = torch.cat([k, k_pos], dim=3).view(hw, bs, self.q_dim * 2)
+        k_p = k_p.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k = torch.cat([k, k_p], dim=3).view(hw, bs, self.q_dim * 2)
 
         qk_attn, qk_attn_weights = self.qk_attn(
-            query=q, key=k, value=v,
+            query=q, key=k, value=v, attn_mask=kv_mask,
             key_padding_mask=kv_padding_mask
         )
         queries = self.ln2(queries + self.dp2(qk_attn))
@@ -520,14 +531,9 @@ class UPT(nn.Module):
         Maximum number of instances (human or object) to sample
     """
     def __init__(self,
-        detector: nn.Module,
-        postprocessor: nn.Module,
-        feature_head: nn.Module,
-        backbone_fusion_layer: int,
-        triplet_decoder: nn.Module,
-        # triplet_embeds: Tensor,
-        # obj_to_triplet: list,
-        obj_to_verb: list,
+        detector: nn.Module, postprocessor: nn.Module,
+        feature_head: nn.Module, backbone_fusion_layer: int,
+        ho_matcher: nn.Module, triplet_decoder: nn.Module,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
@@ -543,14 +549,10 @@ class UPT(nn.Module):
         self.query_embed = detector.query_embed
         self.postprocessor = postprocessor
 
-        self.ho_matcher = HumanObjectMatcher(
-            repr_size=repr_size,
-            num_verbs=num_verbs,
-            obj_to_verb=obj_to_verb,
-            human_idx=human_idx,
-        )
+        self.ho_matcher = ho_matcher
         self.feature_head = feature_head
         self.fusion_layer = backbone_fusion_layer
+        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -692,36 +694,27 @@ class UPT(nn.Module):
         )
         boxes = [r['boxes'] for r in region_props]
 
-        ho_queries, paired_inds, prior_scores, object_types, centre_pe = self.ho_matcher(
+        ho_queries, paired_inds, prior_scores, object_types, positional_embeds = self.ho_matcher(
             region_props, image_sizes
         )
-        # if triplet_cands is None:
-            # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
-            # triplet_cands = [None for _ in range(len(boxes))]
-        # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
-        # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
         memory, mask = self.feature_head(features)
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
-        k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
 
-        output_queries = []
+        query_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
-            output_queries.append(self.decoder(
+            query_embeds.append(self.decoder(
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
-                q_pos=centre_pe[i].unsqueeze(1),
+                q_pos=positional_embeds[i],
                 k_pos=k_pos[i]
             )[0].squeeze(dim=2))
-        mm_queries_collate = torch.cat(output_queries, dim=1)
-        # mm_queries_collate = torch.cat([
-        #     mm_q[q_p_m] for mm_q, q_p_m
-        #     in zip(padded_queries, q_padding_mask)
-        # ])
-        logits = self.binary_classifier(mm_queries_collate)
+        query_embeds = torch.cat(query_embeds, dim=1)
+        logits = self.binary_classifier(query_embeds)
 
         if self.training:
             labels = associate_with_ground_truth(
@@ -748,11 +741,12 @@ def build_detector(args, obj_to_verb):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
-    # if os.path.exists(args.triplet_embeds):
-    #     triplet_embeds = torch.load(args.triplet_embeds)
-    # else:
-    #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
-
+    ho_matcher = HumanObjectMatcher(
+        repr_size=args.repr_dim,
+        num_verbs=args.num_verbs,
+        obj_to_verb=obj_to_verb,
+        dropout=args.dropout
+    )
     decoder_layer = TransformerDecoderLayer(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
@@ -773,8 +767,8 @@ def build_detector(args, obj_to_verb):
         detr, postprocessors['bbox'],
         feature_head=feature_head,
         backbone_fusion_layer=args.backbone_fusion_layer,
+        ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,
-        obj_to_verb=obj_to_verb,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,
         repr_size=args.repr_dim,

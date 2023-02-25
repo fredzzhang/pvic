@@ -117,7 +117,7 @@ class TransformerEncoder(nn.Module):
         return x, attn_weights
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, obj_to_verb, human_idx=0):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
@@ -133,7 +133,7 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(128, 256), nn.ReLU(),
             nn.Linear(256, repr_size), nn.ReLU(),
         )
-        self.encoder = TransformerEncoder(num_layers=2)
+        self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
         self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
@@ -531,12 +531,9 @@ class UPT(nn.Module):
         Maximum number of instances (human or object) to sample
     """
     def __init__(self,
-        detector: nn.Module,
-        postprocessor: nn.Module,
-        feature_head: nn.Module,
-        backbone_fusion_layer: int,
-        triplet_decoder: nn.Module,
-        obj_to_verb: list,
+        detector: nn.Module, postprocessor: nn.Module,
+        feature_head: nn.Module, backbone_fusion_layer: int,
+        ho_matcher: nn.Module, triplet_decoder: nn.Module,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
@@ -552,12 +549,7 @@ class UPT(nn.Module):
         self.query_embed = detector.query_embed
         self.postprocessor = postprocessor
 
-        self.ho_matcher = HumanObjectMatcher(
-            repr_size=repr_size,
-            num_verbs=num_verbs,
-            obj_to_verb=obj_to_verb,
-            human_idx=human_idx,
-        )
+        self.ho_matcher = ho_matcher
         self.feature_head = feature_head
         self.fusion_layer = backbone_fusion_layer
         self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
@@ -749,11 +741,12 @@ def build_detector(args, obj_to_verb):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
-    # if os.path.exists(args.triplet_embeds):
-    #     triplet_embeds = torch.load(args.triplet_embeds)
-    # else:
-    #     raise ValueError(f"Language embeddings for triplets do not exist at {args.triplet_embeds}.")
-
+    ho_matcher = HumanObjectMatcher(
+        repr_size=args.repr_dim,
+        num_verbs=args.num_verbs,
+        obj_to_verb=obj_to_verb,
+        dropout=args.dropout
+    )
     decoder_layer = TransformerDecoderLayer(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
@@ -774,8 +767,8 @@ def build_detector(args, obj_to_verb):
         detr, postprocessors['bbox'],
         feature_head=feature_head,
         backbone_fusion_layer=args.backbone_fusion_layer,
+        ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,
-        obj_to_verb=obj_to_verb,
         num_verbs=args.num_verbs,
         num_triplets=args.num_triplets,
         repr_size=args.repr_dim,

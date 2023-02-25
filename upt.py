@@ -30,7 +30,8 @@ from ops import (
 )
 
 from detr.models import build_model
-from detr.util.misc import nested_tensor_from_tensor_list
+from detr.models.position_encoding import PositionEmbeddingSine
+from detr.util.misc import NestedTensor, nested_tensor_from_tensor_list
 
 class MultiModalFusion(nn.Module):
     def __init__(self, fst_mod_size, scd_mod_size, repr_size):
@@ -147,8 +148,8 @@ class HumanObjectMatcher(nn.Module):
         bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
         b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
 
-        c_pe = compute_sinusoidal_pe(bx_c[:, None]).squeeze(1)
-        wh_pe = compute_sinusoidal_pe(b_wh[:, None]).squeeze(1)
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
 
         box_pe = torch.cat([c_pe, wh_pe], dim=-1)
 
@@ -535,8 +536,6 @@ class UPT(nn.Module):
         feature_head: nn.Module,
         backbone_fusion_layer: int,
         triplet_decoder: nn.Module,
-        # triplet_embeds: Tensor,
-        # obj_to_triplet: list,
         obj_to_verb: list,
         num_verbs: int, num_triplets: int,
         repr_size: int = 384, human_idx: int = 0,
@@ -561,6 +560,7 @@ class UPT(nn.Module):
         )
         self.feature_head = feature_head
         self.fusion_layer = backbone_fusion_layer
+        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -705,33 +705,24 @@ class UPT(nn.Module):
         ho_queries, paired_inds, prior_scores, object_types, positional_embeds = self.ho_matcher(
             region_props, image_sizes
         )
-        # if triplet_cands is None:
-            # triplet_cands = [torch.arange(self.num_triplets).tolist() for _ in range(len(boxes))]
-            # triplet_cands = [None for _ in range(len(boxes))]
-        # mm_queries, dup_inds, triplet_inds = self.vb_matcher(ho_queries, object_types, triplet_cands)
-        # padded_queries, q_padding_mask = pad_queries(mm_queries)
 
         memory, mask = self.feature_head(features)
         b, h, w, c = memory.shape
         memory = memory.reshape(b, h * w, c)
         kv_p_m = mask.reshape(-1, 1, h * w)
-        k_pos = pos[self.fusion_layer].permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
 
-        output_queries = []
+        query_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
-            output_queries.append(self.decoder(
+            query_embeds.append(self.decoder(
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
                 # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
                 q_pos=positional_embeds[i],
                 k_pos=k_pos[i]
             )[0].squeeze(dim=2))
-        mm_queries_collate = torch.cat(output_queries, dim=1)
-        # mm_queries_collate = torch.cat([
-        #     mm_q[q_p_m] for mm_q, q_p_m
-        #     in zip(padded_queries, q_padding_mask)
-        # ])
-        logits = self.binary_classifier(mm_queries_collate)
+        query_embeds = torch.cat(query_embeds, dim=1)
+        logits = self.binary_classifier(query_embeds)
 
         if self.training:
             labels = associate_with_ground_truth(

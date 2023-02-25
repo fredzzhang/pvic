@@ -22,6 +22,7 @@ from torchvision.ops import FeaturePyramidNetwork
 
 from ops import (
     binary_focal_loss_with_logits,
+    compute_spatial_encodings,
     prepare_region_proposals,
     associate_with_ground_truth,
     compute_prior_scores,
@@ -126,10 +127,13 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(256, 256), nn.ReLU(),
             nn.Linear(256, 2)
         )
-        self.encoder = TransformerEncoder(num_layers=2)
-        self.query_head = nn.Sequential(
-            nn.Linear(512, repr_size), nn.LayerNorm(repr_size)
+        self.spatial_head = nn.Sequential(
+            nn.Linear(36, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, repr_size), nn.ReLU(),
         )
+        self.encoder = TransformerEncoder(num_layers=2)
+        self.mmf = MultiModalFusion(512, repr_size, repr_size)
 
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
@@ -184,12 +188,22 @@ class HumanObjectMatcher(nn.Module):
                 object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
                 positional_embeds.append({})
                 continue
+            x = x.flatten(); y = y.flatten()
+            # Compute spatial features
+            pairwise_spatial = compute_spatial_encodings(
+                [boxes[x],], [boxes[y],], [image_sizes[i],]
+            )
+            pairwise_spatial = self.spatial_head(pairwise_spatial)
+            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
 
             box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
             embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
             embeds = embeds.squeeze(1)
             # Compute human-object queries
-            ho_q = self.query_head(torch.cat([embeds[x_keep], embeds[y_keep]], dim=1))
+            ho_q = self.mmf(
+                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
+                pairwise_spatial_reshaped[x_keep, y_keep]
+            )
             # Append matched human-object pairs
             ho_queries.append(ho_q)
             paired_indices.append(torch.stack([x_keep, y_keep], dim=1))

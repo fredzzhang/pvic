@@ -534,7 +534,7 @@ class UPT(nn.Module):
         detector: nn.Module, postprocessor: nn.Module,
         feature_head: nn.Module, backbone_fusion_layer: int,
         ho_matcher: nn.Module, triplet_decoder: nn.Module,
-        num_verbs: int, num_triplets: int,
+        num_verbs: int,
         repr_size: int = 384, human_idx: int = 0,
         alpha: float = 0.5, gamma: float = 2.0,
         box_score_thresh: float = 0.2,
@@ -559,7 +559,6 @@ class UPT(nn.Module):
         self.repr_size = repr_size
         self.human_idx = human_idx
         self.num_verbs = num_verbs
-        self.num_triplets = num_triplets
         self.alpha = alpha
         self.gamma = gamma
         self.box_score_thresh = box_score_thresh
@@ -770,7 +769,6 @@ def build_detector(args, obj_to_verb):
         ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,
         num_verbs=args.num_verbs,
-        num_triplets=args.num_triplets,
         repr_size=args.repr_dim,
         alpha=args.alpha, gamma=args.gamma,
         box_score_thresh=args.box_score_thresh,

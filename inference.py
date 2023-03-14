@@ -8,8 +8,10 @@ Australian Centre for Robotic Vision
 """
 
 import os
+import math
 import torch
 import pocket
+import pocket.advis
 import warnings
 import argparse
 import numpy as np
@@ -47,7 +49,7 @@ def draw_boxes(ax, boxes):
         txt.set_path_effects([peff.withStroke(linewidth=5, foreground='#000000')])
         plt.draw()
 
-def visualise_entire_image(image, output, actions, action=None, thresh=0.001):
+def visualise_entire_image(image, output, attn, actions, action=None, thresh=0.2):
     """Visualise bounding box pairs in the whole image by classes"""
     # Rescale the boxes to original image size
     ow, oh = image.size
@@ -56,95 +58,38 @@ def visualise_entire_image(image, output, actions, action=None, thresh=0.001):
         ow / w, oh / h, ow / w, oh / h
     ]).unsqueeze(0)
     boxes = output['boxes'] * scale_fct
-    # Find the number of human and object instances
-    nh = len(output['pairing'][0].unique()); no = len(boxes)
 
+    image_copy = image.copy()
     scores = output['scores']
-    objects = output['objects']
+    # objects = output['objects']
     pred = output['labels']
     # Visualise detected human-object pairs with attached scores
     if action is not None:
         keep = torch.nonzero(torch.logical_and(scores >= thresh, pred == action)).squeeze(1)
-        print(keep)
         bx_h, bx_o = boxes[output['pairing']].unbind(1)
         pocket.utils.draw_box_pairs(image, bx_h[keep], bx_o[keep], width=5)
-        # image.save("fig.png")
-        # return
         plt.imshow(image)
         plt.axis('off')
 
         for i in range(len(keep)):
-            # bx_h[keep[i], 1] += 20
             txt = plt.text(*bx_h[keep[i], :2], f"{scores[keep[i]]:.2f}", fontsize=15, fontweight='semibold', color='w')
             txt.set_path_effects([peff.withStroke(linewidth=5, foreground='#000000')])
             plt.draw()
         
-        # plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-        # plt.margins(0, 0)
-        # plt.gca().xaxis.set_major_locator(plt.NullLocator())
-        # plt.gca().yaxis.set_major_locator(plt.NullLocator())
-        plt.savefig("fig.png")
-        return
+        plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
+        plt.margins(0, 0)
+        plt.gca().xaxis.set_major_locator(plt.NullLocator())
+        plt.gca().yaxis.set_major_locator(plt.NullLocator())
+        plt.savefig("fig.png", bbox_inches="tight", pad_inches=0)
 
-    pairing = output['pairing']
-    coop_attn = output['attn_maps'][0]
-    comp_attn = output['attn_maps'][1]
-
-    # Visualise attention from the cooperative layer
-    for i, attn_1 in enumerate(coop_attn):
-        fig, axe = plt.subplots(2, 4)
-        fig.suptitle(f"Attention in coop. layer {i}")
-        axe = np.concatenate(axe)
-        ticks = list(range(attn_1[0].shape[0]))
-        labels = [v + 1 for v in ticks]
-        for ax, attn in zip(axe, attn_1):
-            im = ax.imshow(attn.squeeze().T, vmin=0, vmax=1)
-            divider = make_axes_locatable(ax)
-            ax.set_xticks(ticks)
-            ax.set_xticklabels(labels)
-            ax.set_yticks(ticks)
-            ax.set_yticklabels(labels)
-            cax = divider.append_axes('right', size='5%', pad=0.05)
-            fig.colorbar(im, cax=cax)
-
-    x, y = torch.meshgrid(torch.arange(nh), torch.arange(no))
-    x, y = torch.nonzero(x != y).unbind(1)
-    pairs = [str((i.item() + 1, j.item() + 1)) for i, j in zip(x, y)]
-
-    # Visualise attention from the competitive layer
-    fig, axe = plt.subplots(2, 4)
-    fig.suptitle("Attention in comp. layer")
-    axe = np.concatenate(axe)
-    ticks = list(range(len(pairs)))
-    for ax, attn in zip(axe, comp_attn):
-        im = ax.imshow(attn, vmin=0, vmax=1)
-        divider = make_axes_locatable(ax)
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(pairs, rotation=45)
-        ax.set_yticks(ticks)
-        ax.set_yticklabels(pairs)
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im, cax=cax)
-
-    # Print predicted actions and corresponding scores
-    unique_actions = torch.unique(pred)
-    for verb in unique_actions:
-        print(f"\n=> Action: {actions[verb]}")
-        sample_idx = torch.nonzero(pred == verb).squeeze(1)
-        for idx in sample_idx:
-            idxh, idxo = pairing[:, idx] + 1
-            print(
-                f"({idxh.item():<2}, {idxo.item():<2}),",
-                f"score: {scores[idx]:.4f}, object: {OBJECTS[objects[idx]]}."
-            )
-
-    # Draw the bounding boxes
-    plt.figure()
-    plt.imshow(image)
-    plt.axis('off')
-    ax = plt.gca()
-    draw_boxes(ax, boxes)
-    plt.show()
+        for i in keep:
+            ho_pair_idx = output["x"][i]
+            attn_map = attn[0, :, ho_pair_idx].reshape(8, math.ceil(h / 32), math.ceil(w / 32))
+            attn_image = image_copy.copy()
+            pocket.utils.draw_boxes(attn_image, torch.stack([bx_h[i], bx_o[i]]), width=4)
+            for j in range(8):
+                pocket.advis.heatmap(attn_image, attn_map[j: j+1], save_path=f"pair_{i}_attn_head_{j+1}.png")
+                plt.close()
 
 @torch.no_grad()
 def main(args):
@@ -158,6 +103,11 @@ def main(args):
 
     upt = build_detector(args, conversion)
     upt.eval()
+
+    attn_weights = []
+    hook = upt.decoder.layers[-1].qk_attn.register_forward_hook(
+        lambda self, input, output: attn_weights.append(output[1])
+    )
 
     if os.path.exists(args.resume):
         print(f"=> Continue from saved checkpoint {args.resume}")
@@ -178,7 +128,12 @@ def main(args):
         image_tensor, _ = dataset.transforms(image, None)
         output = upt([image_tensor])
 
-    visualise_entire_image(image, output[0], actions, args.action, args.action_score_thresh)
+    hook.remove()
+
+    visualise_entire_image(
+        image, output[0], attn_weights[0],
+        actions, args.action, args.action_score_thresh
+    )
 
 if __name__ == "__main__":
     

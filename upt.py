@@ -693,11 +693,10 @@ class UPT(nn.Module):
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
             query_embeds.append(self.decoder(
                 ho_q.unsqueeze(1), mem.unsqueeze(1),
-                # q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_p_m[i],
                 q_pos=positional_embeds[i],
                 k_pos=k_pos[i]
-            )[0].squeeze(dim=2))
+            ).squeeze(dim=2))
         query_embeds = torch.cat(query_embeds, dim=1)
         logits = self.binary_classifier(query_embeds)
 

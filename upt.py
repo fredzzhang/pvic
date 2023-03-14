@@ -364,8 +364,8 @@ class TransformerDecoderLayer(nn.Module):
     def forward(self,
             queries: Tensor, features: Tensor,
             q_pos: Tensor, k_pos: Tensor,
-            q_mask: Optional[Tensor] = None,
-            kv_mask: Optional[Tensor] = None,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
         ):
@@ -376,9 +376,9 @@ class TransformerDecoderLayer(nn.Module):
             Interaction queries of size (B, N, K).
         features: Tensor
             Image features of size (HW, B, C).
-        q_mask: Tensor, default: None
+        q_attn_mask: Tensor, default: None
             Attention mask to be applied during the self attention of queries.
-        kv_mask: Tensor, default: None
+        qk_attn_mask: Tensor, default: None
             Attention mask to be applied during the cross attention from image
             features to interaction queries.
         q_padding_mask: Tensor, default: None
@@ -393,8 +393,8 @@ class TransformerDecoderLayer(nn.Module):
 
         Returns:
         --------
-        outputs: list
-            A list with the order [queries, q_attn_w, qk_attn_w].
+        outputs: tuple
+            queries, q_attn_w, qk_attn_w
         """
         # Perform self attention amongst queries
         q = self.q_attn_q_proj(queries)
@@ -404,10 +404,10 @@ class TransformerDecoderLayer(nn.Module):
         k_p = self.q_attn_kpos_proj(q_pos["box"])
         q = q + q_p
         k = k + k_p
-        q_attn, q_attn_weights = self.q_attn(
-            q, k, value=v, attn_mask=q_mask,
+        q_attn = self.q_attn(
+            q, k, value=v, attn_mask=q_attn_mask,
             key_padding_mask=q_padding_mask
-        )
+        )[0]
         queries = self.ln1(queries + self.dp1(q_attn))
         # Perform cross attention from memory features to queries
         q = self.qk_attn_q_proj(queries)
@@ -426,15 +426,14 @@ class TransformerDecoderLayer(nn.Module):
         k_p = k_p.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
         k = torch.cat([k, k_p], dim=3).view(hw, bs, self.q_dim * 2)
 
-        qk_attn, qk_attn_weights = self.qk_attn(
-            query=q, key=k, value=v, attn_mask=kv_mask,
+        qk_attn = self.qk_attn(
+            query=q, key=k, value=v, attn_mask=qk_attn_mask,
             key_padding_mask=kv_padding_mask
-        )
+        )[0]
         queries = self.ln2(queries + self.dp2(qk_attn))
         queries = self.ln3(queries + self.dp3(self.ffn(queries)))
 
-        outputs = [queries, q_attn_weights, qk_attn_weights]
-        return outputs
+        return queries
 
 class TransformerDecoder(nn.Module):
 
@@ -453,53 +452,40 @@ class TransformerDecoder(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, queries, features,
-            q_mask: Optional[Tensor] = None,
-            kv_mask: Optional[Tensor] = None,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
             q_pos: Optional[Tensor] = None,
             k_pos: Optional[Tensor] = None,
-            return_q_attn_weights: Optional[bool] = False,
-            return_qk_attn_weights: Optional[bool] = False
         ):
         # Add support for zero layers
         if self.num_layers == 0:
-            return [queries.unsqueeze(0),]
+            return queries.unsqueeze(0)
         # Explicitly handle zero-size queries
         if queries.numel() == 0:
             rp = self.num_layers if self.return_intermediate else 1
-            return [queries.unsqueeze(0).repeat(rp, 1, 1, 1),]
+            return queries.unsqueeze(0).repeat(rp, 1, 1, 1)
 
-        outputs = [queries,]
+        output = queries
         intermediate = []
-        q_attn_w = []
-        qk_attn_w = []
         for layer in self.layers:
-            outputs = layer(
-                outputs[0], features,
-                q_mask=q_mask, kv_mask=kv_mask,
+            output = layer(
+                output, features,
+                q_attn_mask=q_attn_mask,
+                qk_attn_mask=qk_attn_mask,
                 q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_padding_mask,
                 q_pos=q_pos, k_pos=k_pos,
             )
             if self.return_intermediate:
-                intermediate.append(self.norm(outputs[0]))
-            if return_q_attn_weights:
-                q_attn_w.append(outputs[1])
-            if return_qk_attn_weights:
-                qk_attn_w.append(outputs[2])
+                intermediate.append(self.norm(output))
 
         if self.return_intermediate:
-            outputs = [torch.stack(intermediate),]
+            output = torch.stack(intermediate)
         else:
-            outputs = [self.norm(outputs[0]).unsqueeze(0),]
-        if return_q_attn_weights:
-            q_attn_w = torch.stack(q_attn_w)
-            outputs.append(q_attn_w)
-        if return_qk_attn_weights:
-            qk_attn_w = torch.stack(qk_attn_w)
-            outputs.append(qk_attn_w)
-        return outputs
+            output = self.norm(output).unsqueeze(0)
+        return output
 
 class UPT(nn.Module):
     """
@@ -621,7 +607,7 @@ class UPT(nn.Module):
             scores = lg[x, y].sigmoid() * pr[x, y]
             detections.append(dict(
                 boxes=bx, pairing=p_inds[x], scores=scores,
-                labels=y, objects=objs[x], size=size
+                labels=y, objects=objs[x], size=size, x=x
             ))
 
         return detections

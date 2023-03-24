@@ -437,7 +437,7 @@ class TransformerDecoderLayer(nn.Module):
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+    def __init__(self, decoder_layer, num_layers, return_intermediate=True):
         super().__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
         self.num_layers = num_layers
@@ -738,8 +738,7 @@ def build_detector(args, obj_to_verb):
     )
     triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
-        num_layers=args.triplet_dec_layers,
-        return_intermediate=args.triplet_aux_loss
+        num_layers=args.triplet_dec_layers
     )
     feature_head = FeatureHead(
         args.hidden_dim,

@@ -10,10 +10,14 @@ Microsoft Research Asia
 import os
 import time
 import torch
-import wandb
 import pickle
 import numpy as np
 import scipy.io as sio
+
+try:
+    import wandb
+except ImportError:
+    pass
 
 from tqdm import tqdm
 from collections import defaultdict

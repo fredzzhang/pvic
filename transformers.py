@@ -150,7 +150,7 @@ class TransformerDecoderLayer(nn.Module):
         Parameters:
         -----------
         queries: Tensor
-            Interaction queries of size (B, N, K).
+            Interaction queries of size (N, B, K).
         features: Tensor
             Image features of size (HW, B, C).
         q_attn_mask: Tensor, default: None
@@ -170,8 +170,7 @@ class TransformerDecoderLayer(nn.Module):
 
         Returns:
         --------
-        outputs: tuple
-            queries, q_attn_w, qk_attn_w
+        queries: Tensor
         """
         # Perform self attention amongst queries
         q = self.q_attn_q_proj(queries)

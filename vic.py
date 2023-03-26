@@ -214,7 +214,10 @@ class ViC(nn.Module):
         super().__init__()
 
         self.detector = detector[0]
-        self.od_forward = {"detr": self.detr_forward}[detector[1]]
+        self.od_forward = {
+            "base": self.base_forward,
+            "advanced": self.advanced_forward,
+        }[detector[1]]
         self.postprocessor = postprocessor
 
         self.ho_matcher = ho_matcher
@@ -284,7 +287,7 @@ class ViC(nn.Module):
         return detections
 
     @staticmethod
-    def detr_forward(ctx, samples: NestedTensor):
+    def base_forward(ctx, samples: NestedTensor):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, pos = ctx.backbone(samples)
@@ -297,6 +300,10 @@ class ViC(nn.Module):
         outputs_coord = ctx.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         return out, hs, features
+
+    @staticmethod
+    def advanced_forward(ctx, samples: NestedTensor):
+        pass
 
     def forward(self,
         images: List[Tensor],
@@ -408,11 +415,10 @@ def build_detector(args, obj_to_verb):
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
     )
+    return_layer = {"C5": -1, "C4": -2, "C3": -3}[args.kv_src]
     feature_head = FeatureHead(
-        args.hidden_dim,
-        detr.backbone.num_channels,
-        args.backbone_fusion_layer,
-        args.triplet_enc_layers
+        args.hidden_dim, detr.backbone.num_channels,
+        return_layer, args.triplet_enc_layers
     )
     detector = ViC(
         (detr, args.detector), postprocessors['bbox'],

@@ -10,3 +10,6 @@
 [submodule "detr"]
 	path = detr
 	url = https://github.com/fredzzhang/detr.git
+[submodule "h-detr"]
+	path = h_detr
+	url = https://github.com/fredzzhang/h-detr.git

@@ -1,10 +1,10 @@
 """
-Swin Transformer as described in
+Implementations of transformers and variants
 
-https://arxiv.org/abs/2103.14030
-https://arxiv.org/abs/2111.09883
+Implementation of encoder and decoder are adapted from DETR codebase by Facebook Research
+https://github.com/facebookresearch/detr/blob/main/models/transformer.py
 
-Implementation adapted from microsoft/Swin-Transformer and torchvision
+Implementation of Swin Transformers are adapted from microsoft/Swin-Transformer and torchvision
 https://github.com/microsoft/Swin-Transformer/tree/main/models
 https://github.com/pytorch/vision/blob/main/torchvision/models/swin_transformer.py
 
@@ -13,12 +13,257 @@ Fred Zhang <frederic.zhang@anu.edu.au>
 The Australian National University
 Microsoft Research Asia
 """
+import copy
 import math
 import torch
 import torch.nn.functional as F
 
 from torch import nn, Tensor
+from attention import MultiheadAttention
 from typing import List, Optional, Callable
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, dim, num_heads, ffn_interm_dim, dropout=0.1):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.ffn_interm_dim = ffn_interm_dim
+        # Linear projections on qkv have been removed in this custom layer.
+        self.attn = MultiheadAttention(dim, num_heads, dropout=dropout)
+        # Add the missing linear projections.
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        # The positional embeddings include box centres, widths and heights,
+        # which will be twice the representation size.
+        self.qpos_proj = nn.Linear(2 * dim, dim)
+        self.kpos_proj = nn.Linear(2 * dim, dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, dim)
+        )
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
+
+    def forward(self, x, pos,
+            attn_mask: Optional[Tensor] = None,
+            key_padding_mask: Optional[Tensor] = None,
+        ):
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        q_pos = self.qpos_proj(pos)
+        k_pos = self.kpos_proj(pos)
+        q = q + q_pos
+        k = k + k_pos
+        attn, attn_weights = self.attn(
+            query=q, key=k, value=v,
+            attn_mask=attn_mask, key_padding_mask=key_padding_mask
+        )
+        x = self.ln1(x + self.dp1(attn))
+        x = self.ln2(x + self.dp2(self.ffn(x)))
+        return x, attn_weights
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, hidden_size=256, num_heads=8, num_layers=2, dropout=.1):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = nn.ModuleList([TransformerEncoderLayer(
+            dim=hidden_size, num_heads=num_heads,
+            ffn_interm_dim=hidden_size * 4, dropout=dropout
+        ) for _ in range(num_layers)])
+
+    def forward(self, x, pos):
+        attn_weights = []
+        for layer in self.layers:
+            x, attn = layer(x, pos)
+            attn_weights.append(attn)
+        return x, attn_weights
+
+class TransformerDecoderLayer(nn.Module):
+
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
+        """
+        Parameters:
+        -----------
+        q_dim: int
+            Dimension of the interaction queries.
+        kv_dim: int
+            Dimension of the image features.
+        num_heads: int
+            Number of heads used in multihead attention.
+        ffn_interm_dim: int
+            Dimension of the intermediate representation in the feedforward network.
+        dropout: float, default: 0.1
+            Dropout percentage used during training.
+        """
+        super().__init__()
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.ffn_interm_dim = ffn_interm_dim
+
+        # Linear projections on qkv have been removed in this custom layer.
+        self.q_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
+        # Add the missing linear projections.
+        self.q_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_k_proj = nn.Linear(q_dim, q_dim)
+        self.q_attn_v_proj = nn.Linear(q_dim, q_dim)
+        # Each scalar is mapped to a vector of shape kv_dim // 2.
+        # For a box pair, the dimension is 8 * (kv_dim // 2).
+        self.q_attn_qpos_proj = nn.Linear(kv_dim * 4, q_dim)
+        self.q_attn_kpos_proj = nn.Linear(kv_dim * 4, q_dim)
+
+        self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
+        self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.qk_attn_k_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_v_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_kpos_proj = nn.Linear(kv_dim, q_dim)
+        self.qk_attn_qpos_proj = nn.Linear(kv_dim * 2, q_dim)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
+        )
+        self.ln1 = nn.LayerNorm(q_dim)
+        self.ln2 = nn.LayerNorm(q_dim)
+        self.ln3 = nn.LayerNorm(q_dim)
+        self.dp1 = nn.Dropout(dropout)
+        self.dp2 = nn.Dropout(dropout)
+        self.dp3 = nn.Dropout(dropout)
+
+    def forward(self,
+            queries: Tensor, features: Tensor,
+            q_pos: Tensor, k_pos: Tensor,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+        ):
+        """
+        Parameters:
+        -----------
+        queries: Tensor
+            Interaction queries of size (B, N, K).
+        features: Tensor
+            Image features of size (HW, B, C).
+        q_attn_mask: Tensor, default: None
+            Attention mask to be applied during the self attention of queries.
+        qk_attn_mask: Tensor, default: None
+            Attention mask to be applied during the cross attention from image
+            features to interaction queries.
+        q_padding_mask: Tensor, default: None
+            Padding mask for interaction queries of size (B, N). Values of `True`
+            indicate the corresponding query was padded and to be ignored.
+        kv_padding_mask: Tensor, default: None
+            Padding mask for image features of size (B, HW).
+        q_pos: Tensor, default: None
+            Positional encodings for the interaction queries.
+        k_pos: Tensor, default: None
+            Positional encodings for the image features.
+
+        Returns:
+        --------
+        outputs: tuple
+            queries, q_attn_w, qk_attn_w
+        """
+        # Perform self attention amongst queries
+        q = self.q_attn_q_proj(queries)
+        k = self.q_attn_k_proj(queries)
+        v = self.q_attn_v_proj(queries)
+        q_p = self.q_attn_qpos_proj(q_pos["box"])
+        k_p = self.q_attn_kpos_proj(q_pos["box"])
+        q = q + q_p
+        k = k + k_p
+        q_attn = self.q_attn(
+            q, k, value=v, attn_mask=q_attn_mask,
+            key_padding_mask=q_padding_mask
+        )[0]
+        queries = self.ln1(queries + self.dp1(q_attn))
+        # Perform cross attention from memory features to queries
+        q = self.qk_attn_q_proj(queries)
+        k = self.qk_attn_k_proj(features)
+        v = self.qk_attn_v_proj(features)
+        q_p = self.qk_attn_qpos_proj(q_pos["centre"])
+        k_p = self.qk_attn_kpos_proj(k_pos)
+
+        n_q, bs, _ = q.shape
+        q = q.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q_p = q_p.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
+        q = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim * 2)
+
+        hw, _, _ = k.shape
+        k = k.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k_p = k_p.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        k = torch.cat([k, k_p], dim=3).view(hw, bs, self.q_dim * 2)
+
+        qk_attn = self.qk_attn(
+            query=q, key=k, value=v, attn_mask=qk_attn_mask,
+            key_padding_mask=kv_padding_mask
+        )[0]
+        queries = self.ln2(queries + self.dp2(qk_attn))
+        queries = self.ln3(queries + self.dp3(self.ffn(queries)))
+
+        return queries
+
+class TransformerDecoder(nn.Module):
+
+    def __init__(self, decoder_layer, num_layers, return_intermediate=True):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
+        self.return_intermediate = return_intermediate
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, queries, features,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+            q_pos: Optional[Tensor] = None,
+            k_pos: Optional[Tensor] = None,
+        ):
+        # Add support for zero layers
+        if self.num_layers == 0:
+            return queries.unsqueeze(0)
+        # Explicitly handle zero-size queries
+        if queries.numel() == 0:
+            rp = self.num_layers if self.return_intermediate else 1
+            return queries.unsqueeze(0).repeat(rp, 1, 1, 1)
+
+        output = queries
+        intermediate = []
+        for layer in self.layers:
+            output = layer(
+                output, features,
+                q_attn_mask=q_attn_mask,
+                qk_attn_mask=qk_attn_mask,
+                q_padding_mask=q_padding_mask,
+                kv_padding_mask=kv_padding_mask,
+                q_pos=q_pos, k_pos=k_pos,
+            )
+            if self.return_intermediate:
+                intermediate.append(self.norm(output))
+
+        if self.return_intermediate:
+            output = torch.stack(intermediate)
+        else:
+            output = self.norm(output).unsqueeze(0)
+        return output
+
 
 def _get_relative_position_bias(
     relative_position_bias_table: torch.Tensor, relative_position_index: torch.Tensor, window_size: List[int]
@@ -489,3 +734,55 @@ class SwinTransformerBlockV2(SwinTransformerBlock):
         x = x + self.stochastic_depth(self.norm1(self.attn(x)))
         x = x + self.stochastic_depth(self.norm2(self.mlp(x)))
         return x
+
+class SwinTransformer(nn.Module):
+
+    def __init__(self, dim, num_layers):
+        """
+        A feature stage consisting of a series of Swin Transformer V2 blocks.
+
+        Parameters:
+        -----------
+        dim: int
+            Dimension of the input features.
+        """
+        super().__init__()
+        self.dim = dim
+
+        self.depth = num_layers
+        self.num_heads = dim // 32
+        self.window_size = 8
+        self.base_sd_prob = 0.2
+
+        shift_size = [
+            [self.window_size // 2] * 2 if i % 2
+            else [0, 0] for i in range(self.depth)
+        ]
+        # TODO fix this hack
+        # Use stochastic depth parameters from the third stage of Swin-T variant.
+        # In practice, varying this value does not make a significant difference.
+        sd_prob = (torch.linspace(0, 1, 12)[10-num_layers:10] * self.base_sd_prob).tolist()
+
+        blocks: List[nn.Module] = []
+        for i in range(self.depth):
+            blocks.append(SwinTransformerBlockV2(
+                dim=dim, num_heads=self.num_heads,
+                window_size=[self.window_size] * 2,
+                shift_size=shift_size[i],
+                stochastic_depth_prob=sd_prob[i]
+            ))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x):
+        """
+        Parameters:
+        -----------
+        x: Tensor
+            Input features maps of shape (B, H, W, C).
+
+        Returns:
+        --------
+        Tensor
+            Output feature maps of shape (B, H, W, C).
+        """
+        return self.blocks(x)

@@ -200,7 +200,7 @@ class ViC(nn.Module):
     """Two-stage HOI detector with enhanced visual context"""
 
     def __init__(self,
-        detector: Tuple(nn.Module, str), postprocessor: nn.Module,
+        detector: Tuple[nn.Module, str], postprocessor: nn.Module,
         feature_head: nn.Module, ho_matcher: nn.Module,
         triplet_decoder: nn.Module, num_verbs: int,
         repr_size: int = 384, human_idx: int = 0,
@@ -415,7 +415,7 @@ def build_detector(args, obj_to_verb):
         args.triplet_enc_layers
     )
     detector = ViC(
-        detr, postprocessors['bbox'],
+        (detr, args.detector), postprocessors['bbox'],
         feature_head=feature_head,
         ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,

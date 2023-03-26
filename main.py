@@ -19,7 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 
-from upt import build_detector
+from vic import build_detector
 from utils import custom_collate, CustomisedDLE, DataFactory
 
 warnings.filterwarnings("ignore")
@@ -159,12 +159,9 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--nheads', default=8, type=int)
     parser.add_argument('--num-queries', default=100, type=int)
-    parser.add_argument('--pre-norm', action='store_true')
 
     parser.add_argument('--triplet-enc-layers', default=1, type=int)
     parser.add_argument('--triplet-dec-layers', default=2, type=int)
-    parser.add_argument('--triplet-embeds', default="", type=str)
-    parser.add_argument('--k', default=50, type=int)
 
     parser.add_argument('--no-aux-loss', dest='aux_loss', action='store_false')
     parser.add_argument('--set-cost-class', default=1, type=float)
@@ -176,7 +173,7 @@ if __name__ == '__main__':
                         help="Relative classification weight of the no-object class")
 
     parser.add_argument('--alpha', default=0.5, type=float)
-    parser.add_argument('--gamma', default=0.2, type=float)
+    parser.add_argument('--gamma', default=0.1, type=float)
 
     parser.add_argument('--dataset', default='hicodet', type=str)
     parser.add_argument('--partitions', nargs='+', default=['train2015', 'test2015'], type=str)
@@ -199,7 +196,6 @@ if __name__ == '__main__':
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--sanity', action='store_true')
     parser.add_argument('--box-score-thresh', default=0.2, type=float)
-    parser.add_argument('--fg-iou-thresh', default=0.5, type=float)
     parser.add_argument('--min-instances', default=3, type=int)
     parser.add_argument('--max-instances', default=15, type=int)
 

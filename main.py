@@ -1,6 +1,6 @@
 """
 Utilities for training, testing and caching results
-for HICO-DET and V-COCO evaluations.
+for HICO-DET and V-COCO evaluations
 
 Fred Zhang <frederic.zhang@anu.edu.au>
 
@@ -19,7 +19,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 
-from upt import build_detector
+from vic import build_detector
+from configs import base_detector_args
 from utils import custom_collate, CustomisedDLE, DataFactory
 
 warnings.filterwarnings("ignore")
@@ -43,11 +44,11 @@ def main(rank, args):
 
     trainset = DataFactory(
         name=args.dataset, partition=args.partitions[0],
-        data_root=args.data_root, k=args.k
+        data_root=args.data_root
     )
     testset = DataFactory(
         name=args.dataset, partition=args.partitions[1],
-        data_root=args.data_root, k=args.k
+        data_root=args.data_root
     )
 
     train_loader = DataLoader(
@@ -70,22 +71,20 @@ def main(rank, args):
     if args.dataset == 'hicodet':
         object_to_target = train_loader.dataset.dataset.object_to_verb
         args.num_verbs = 117
-        args.num_triplets = 600
     elif args.dataset == 'vcoco':
-        # TODO add obj_to_triplet, number of triplets
         object_to_target = list(train_loader.dataset.dataset.object_to_action.values())
         args.num_verbs = 24
     
-    upt = build_detector(args, object_to_target)
+    model = build_detector(args, object_to_target)
 
     if os.path.exists(args.resume):
         print(f"=> Rank {rank}: continue from saved checkpoint {args.resume}")
         checkpoint = torch.load(args.resume, map_location='cpu')
-        upt.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'])
     else:
         print(f"=> Rank {rank}: start from a randomly initialised model")
 
-    engine = CustomisedDLE(upt, train_loader, test_loader, args)
+    engine = CustomisedDLE(model, train_loader, test_loader, args)
 
     if args.cache:
         if args.dataset == 'hicodet':
@@ -109,8 +108,8 @@ def main(rank, args):
             )
         return
 
-    upt.freeze_detector()
-    param_dicts = [{"params": [p for p in upt.parameters() if p.requires_grad]}]
+    model.freeze_detector()
+    param_dicts = [{"params": [p for p in model.parameters() if p.requires_grad]}]
     optim = torch.optim.AdamW(param_dicts, lr=args.lr_head, weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_drop, gamma=args.lr_drop_factor)
     # Override optimiser and learning rate scheduler
@@ -124,84 +123,42 @@ def sanity_check(args):
     args.num_verbs = 117
     args.num_triplets = 600
     object_to_target = dataset.dataset.object_to_verb
-    upt = build_detector(args, object_to_target)
+    model = build_detector(args, object_to_target)
     if args.eval:
-        upt.eval()
+        model.eval()
     if os.path.exists(args.resume):
         ckpt = torch.load(args.resume, map_location='cpu')
         print(f"Loading checkpoints from {args.resume}.")
-        upt.load_state_dict(ckpt['model_state_dict'])
+        model.load_state_dict(ckpt['model_state_dict'])
 
     image, target = dataset[998]
-    outputs = upt([image], targets=[target])
+    outputs = model([image], targets=[target])
 
 if __name__ == '__main__':
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--lr-head', default=1e-4, type=float)
-    parser.add_argument('--batch-size', default=16, type=int)
-    parser.add_argument('--weight-decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=20, type=int)
-    parser.add_argument('--lr-drop', default=10, type=int)
-    parser.add_argument('--lr-drop-factor', default=0.1, type=float)
-    parser.add_argument('--clip-max-norm', default=0.1, type=float)
+    parser = argparse.ArgumentParser(parents=[base_detector_args(),])
 
-    parser.add_argument('--backbone', default='resnet50', type=str)
+    parser.add_argument('--detector', default='detr', type=str)
     parser.add_argument('--backbone-fusion-layer', default=-1, type=int)
-    parser.add_argument('--dilation', action='store_true')
-    parser.add_argument('--position-embedding', default='sine', type=str, choices=('sine', 'learned'))
-
     parser.add_argument('--repr-dim', default=384, type=int)
-    parser.add_argument('--hidden-dim', default=256, type=int)
-    parser.add_argument('--enc-layers', default=6, type=int)
-    parser.add_argument('--dec-layers', default=6, type=int)
-    parser.add_argument('--dim-feedforward', default=2048, type=int)
-    parser.add_argument('--dropout', default=0.1, type=float)
-    parser.add_argument('--nheads', default=8, type=int)
-    parser.add_argument('--num-queries', default=100, type=int)
-    parser.add_argument('--pre-norm', action='store_true')
-
     parser.add_argument('--triplet-enc-layers', default=1, type=int)
     parser.add_argument('--triplet-dec-layers', default=2, type=int)
-    parser.add_argument('--triplet-embeds', default="", type=str)
-    parser.add_argument('--k', default=50, type=int)
 
-    parser.add_argument('--no-aux-loss', dest='aux_loss', action='store_false')
-    parser.add_argument('--set-cost-class', default=1, type=float)
-    parser.add_argument('--set-cost-bbox', default=5, type=float)
-    parser.add_argument('--set-cost-giou', default=2, type=float)
-    parser.add_argument('--bbox-loss-coef', default=5, type=float)
-    parser.add_argument('--giou-loss-coef', default=2, type=float)
-    parser.add_argument('--eos-coef', default=0.1, type=float,
-                        help="Relative classification weight of the no-object class")
+    parser.add_argument('--alpha', default=.5, type=float)
+    parser.add_argument('--gamma', default=.1, type=float)
+    parser.add_argument('--box-score-thresh', default=.05, type=float)
+    parser.add_argument('--min-instances', default=3, type=int)
+    parser.add_argument('--max-instances', default=15, type=int)
 
-    parser.add_argument('--alpha', default=0.5, type=float)
-    parser.add_argument('--gamma', default=0.2, type=float)
-
-    parser.add_argument('--dataset', default='hicodet', type=str)
-    parser.add_argument('--partitions', nargs='+', default=['train2015', 'test2015'], type=str)
-    parser.add_argument('--num-workers', default=2, type=int)
-    parser.add_argument('--data-root', default='./hicodet')
-    parser.add_argument('--output-dir', default='checkpoints')
-    parser.add_argument('--pretrained', default='', help='Path to a pretrained detector')
     parser.add_argument('--resume', default='', help='Resume from a model')
-
     parser.add_argument('--use-wandb', default=False, action='store_true')
 
-    # training parameters
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
     parser.add_argument('--port', default='1234', type=str)
-    parser.add_argument('--seed', default=66, type=int)
-    parser.add_argument('--print-interval', default=100, type=int)
+    parser.add_argument('--seed', default=140, type=int)
     parser.add_argument('--world-size', default=8, type=int)
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--sanity', action='store_true')
-    parser.add_argument('--box-score-thresh', default=0.2, type=float)
-    parser.add_argument('--fg-iou-thresh', default=0.5, type=float)
-    parser.add_argument('--min-instances', default=3, type=int)
-    parser.add_argument('--max-instances', default=15, type=int)
 
     args = parser.parse_args()
     print(args)

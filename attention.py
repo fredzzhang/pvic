@@ -1,31 +1,27 @@
 # ------------------------------------------------------------------------
-# DAB-DETR
-# Copyright (c) 2022 IDEA. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-# Modified from Conditional DETR (https://github.com/Atten4Vis/ConditionalDETR)
+# Conditional DETR
 # Copyright (c) 2021 Microsoft. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from codes in torch.nn
-# ------------------------------------------------------------------------
 
 """
-MultiheadAttention that support query, key, and value to have different dimensions.
-Query, key, and value projections are removed.
-Mostly copy-paste from https://github.com/pytorch/pytorch/blob/master/torch/nn/modules/activation.py#L873
-and https://github.com/pytorch/pytorch/blob/master/torch/nn/functional.py#L4837
+MultiheadAttention modified from PyTorch implementation. The linear projection
+layers on keys, queries and values have been removed to support separate projections.
+In addition, the returned attention weights are no longer averaged across all heads.
+
+https://github.com/pytorch/pytorch/blob/master/torch/nn/modules/activation.py#L873
+https://github.com/pytorch/pytorch/blob/master/torch/nn/functional.py#L4837
+
+Fred Zhang <frederic.zhang@anu.edu.au>
+
+The Australian National University
+Microsoft Research Asia
 """
 
-import copy
-from typing import Optional, List
+from typing import Optional
 
 import torch
-import torch.nn.functional as F
-from torch import nn, Tensor
+from torch import Tensor
 
 import warnings
 from typing import Tuple, Optional
@@ -33,28 +29,15 @@ from typing import Tuple, Optional
 import torch
 from torch import Tensor
 from torch.nn.modules.linear import Linear
-from torch.nn.init import xavier_uniform_
 from torch.nn.init import constant_
-from torch.nn.init import xavier_normal_
-from torch.nn.parameter import Parameter
 from torch.nn.modules.module import Module
-from torch.nn import functional as F
 
 import warnings
-import math
-
-from torch._C import _infer_size, _add_docstr
-from torch.nn import _reduction as _Reduction
-from torch.nn.modules import utils
-from torch.nn.modules.utils import _single, _pair, _triple, _list_with_default
-from torch.nn import grad
-from torch import _VF
-from torch._jit_internal import boolean_dispatch, List, Optional, _overload, Tuple
+from torch._jit_internal import Optional, Tuple
 try:
     from torch.overrides import has_torch_function, handle_torch_function
 except:
     from torch._overrides import has_torch_function, handle_torch_function
-Tensor = torch.Tensor
 
 from torch.nn.functional import linear, pad, softmax, dropout
 

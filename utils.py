@@ -35,16 +35,14 @@ from detr.datasets import transforms as T
 
 def custom_collate(batch):
     images = []
-    # triplet_cands = []
     targets = []
     for im, tar in batch:
         images.append(im)
-        # triplet_cands.append(t_cands)
         targets.append(tar)
     return images, targets
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root, k=50):
+    def __init__(self, name, partition, data_root):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -56,7 +54,6 @@ class DataFactory(Dataset):
                 anno_file=os.path.join(data_root, f"instances_{partition}.json"),
                 target_transform=pocket.ops.ToTensor(input_format='dict')
             )
-            self.triplet_cands = torch.load(os.path.join(data_root, f"triplet_ranking_{partition}.pt"))
         else:
             assert partition in ['train', 'val', 'trainval', 'test'], \
                 "Unknown V-COCO partition " + partition
@@ -71,7 +68,6 @@ class DataFactory(Dataset):
                 anno_file=os.path.join(data_root, f"instances_vcoco_{partition}.json"),
                 target_transform=pocket.ops.ToTensor(input_format='dict')
             )
-            # TODO potentially add triplet candidates here
 
         # Prepare dataset transforms
         normalize = T.Compose([
@@ -99,14 +95,12 @@ class DataFactory(Dataset):
             ])
 
         self.name = name
-        self.k = k
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, i):
         image, target = self.dataset[i]
-        # triplet_cands = self.triplet_cands[i, :self.k]
         if self.name == 'hicodet':
             target['labels'] = target['verb']
             # Convert ground truth boxes to zero-based index and the
@@ -114,7 +108,6 @@ class DataFactory(Dataset):
             target['boxes_h'][:, :2] -= 1
             target['boxes_o'][:, :2] -= 1
         else:
-            # TODO Potentially change labels to triplet class
             target['labels'] = target['actions']
             target['object'] = target.pop('objects')
 

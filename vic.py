@@ -1,5 +1,5 @@
 """
-Unary-pairwise transformer for human-object interaction detection
+Two-stage HOI detector with enhanced visual context
 
 Fred Zhang <frederic.zhang@anu.edu.au>
 
@@ -13,8 +13,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from torch import nn, Tensor
-from typing import Optional, List
 from collections import OrderedDict
+from typing import Optional, Tuple, List
 from torchvision.ops import FeaturePyramidNetwork
 
 from transformers import (
@@ -200,7 +200,7 @@ class ViC(nn.Module):
     """Two-stage HOI detector with enhanced visual context"""
 
     def __init__(self,
-        detector: nn.Module, postprocessor: nn.Module,
+        detector: Tuple(nn.Module, str), postprocessor: nn.Module,
         feature_head: nn.Module, ho_matcher: nn.Module,
         triplet_decoder: nn.Module, num_verbs: int,
         repr_size: int = 384, human_idx: int = 0,
@@ -213,7 +213,8 @@ class ViC(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.detector = detector
+        self.detector = detector[0]
+        self.od_forward = {"detr": self.detr_forward}[detector[1]]
         self.postprocessor = postprocessor
 
         self.ho_matcher = ho_matcher
@@ -334,7 +335,7 @@ class ViC(nn.Module):
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
         with torch.no_grad():
-            results, hs, features = self.detr_forward(self.detector, images)
+            results, hs, features = self.od_forward(self.detector, images)
             results = self.postprocessor(results, image_sizes)
 
         region_props = prepare_region_proposals(

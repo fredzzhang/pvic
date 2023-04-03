@@ -396,7 +396,7 @@ class ViC(nn.Module):
                 "pred_logits": enc_outputs_class,
                 "pred_boxes": enc_outputs_coord,
             }
-        return out, hs[-1], features
+        return out, hs, features
 
     def forward(self,
         images: List[Tensor],
@@ -515,11 +515,15 @@ def build_detector(args, obj_to_verb):
         num_layers=args.triplet_dec_layers
     )
     return_layer = {"C5": -1, "C4": -2, "C3": -3}[args.kv_src]
+    if isinstance(detr.backbone.num_channels, list):
+        num_channels = detr.backbone.num_channels[-1]
+    else:
+        num_channels = detr.backbone.num_channels
     feature_head = FeatureHead(
-        args.hidden_dim, detr.backbone.num_channels,
+        args.hidden_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
-    detector = ViC(
+    model = ViC(
         (detr, args.detector), postprocessors['bbox'],
         feature_head=feature_head,
         ho_matcher=ho_matcher,
@@ -531,4 +535,4 @@ def build_detector(args, obj_to_verb):
         min_instances=args.min_instances,
         max_instances=args.max_instances,
     )
-    return detector
+    return model

@@ -82,9 +82,11 @@ def advanced_detector_args():
                         help="Number of query slots for one-to-one matching",)
 
     # Hybrid matching settings
-    parser.add_argument("--k_one2many", default=6, type=int)
-    parser.add_argument("--num_queries_one2many", default=0, type=int,
+    parser.add_argument('--num_queries_one2many', default=0, type=int,
                         help="Number of query slots for one-to-many matchining",)
+
+    # Segmentation
+    parser.add_argument('--masks', action="store_true")
 
     # Deformable transformer
     parser.add_argument('--dec_n_points', default=4, type=int)
@@ -102,6 +104,7 @@ def advanced_detector_args():
 
     # Training
     parser.add_argument('--lr-head', default=1e-4, type=float)
+    parser.add_argument('--lr_backbone', default=0., type=float)
     parser.add_argument('--lr-drop', default=20, type=int)
     parser.add_argument('--lr-drop-factor', default=.2, type=float)
     parser.add_argument('--epochs', default=30, type=int)
@@ -118,8 +121,12 @@ def advanced_detector_args():
     parser.add_argument('--set-cost-class', default=2, type=float)
     parser.add_argument('--set-cost-bbox', default=5, type=float)
     parser.add_argument('--set-cost-giou', default=2, type=float)
+    parser.add_argument("--mask_loss_coef", default=1, type=float)
+    parser.add_argument("--dice_loss_coef", default=1, type=float)
+    parser.add_argument("--cls_loss_coef", default=2, type=float)
     parser.add_argument('--bbox-loss-coef', default=5, type=float)
     parser.add_argument('--giou-loss-coef', default=2, type=float)
+    parser.add_argument("--focal_alpha", default=0.25, type=float)
 
     # Misc.
     parser.add_argument('--device', default='cuda',
@@ -131,3 +138,4 @@ def advanced_detector_args():
     parser.add_argument('--output-dir', default='checkpoints')
     parser.add_argument('--pretrained', default='', help='Path to a pretrained detector')
     parser.add_argument('--print-interval', default=100, type=int)
+    return parser

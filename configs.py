@@ -66,10 +66,10 @@ def advanced_detector_args():
     parser.add_argument('--backbone', default='resnet50', type=str)
     parser.add_argument('--dilation', action='store_true')
     parser.add_argument('--position-embedding', default='sine', type=str, choices=('sine', 'learned'))
-    parser.add_argument('--position_embedding_scale', default=2 * np.pi, type=float,
+    parser.add_argument('--position-embedding-scale', default=2 * np.pi, type=float,
                         help="position / size * scale")
-    parser.add_argument('--num_feature_levels', default=4, type=int, help='number of feature levels')
-    parser.add_argument("--drop_path_rate", default=0.2, type=float)
+    parser.add_argument('--num-feature-levels', default=4, type=int, help='number of feature levels')
+    parser.add_argument("--drop-path-rate", default=0.2, type=float)
 
     # Transformer
     parser.add_argument('--hidden-dim', default=256, type=int)
@@ -78,40 +78,40 @@ def advanced_detector_args():
     parser.add_argument('--dim-feedforward', default=2048, type=int)
     parser.add_argument('--dropout', default=.0, type=float)
     parser.add_argument('--nheads', default=8, type=int)
-    parser.add_argument("--num_queries_one2one", default=300, type=int,
+    parser.add_argument("--num-queries-one2one", default=300, type=int,
                         help="Number of query slots for one-to-one matching",)
 
     # Hybrid matching settings
-    parser.add_argument('--num_queries_one2many', default=0, type=int,
+    parser.add_argument('--num-queries-one2many', default=0, type=int,
                         help="Number of query slots for one-to-many matchining",)
 
     # Segmentation
     parser.add_argument('--masks', action="store_true")
 
     # Deformable transformer
-    parser.add_argument('--dec_n_points', default=4, type=int)
-    parser.add_argument('--enc_n_points', default=4, type=int)
-    parser.add_argument('--no_box_refine', dest="with_box_refine",
+    parser.add_argument('--dec-n-points', default=4, type=int)
+    parser.add_argument('--enc-n-points', default=4, type=int)
+    parser.add_argument('--no-box-refine', dest="with_box_refine",
                         default=True, action='store_false')
-    parser.add_argument('--no_two_stage', dest="two_stage",
+    parser.add_argument('--no-two-stage', dest="two_stage",
                         default=True, action='store_false')
 
     # Tricks
-    parser.add_argument("--no_mixed_selection", dest="mixed_selection",
+    parser.add_argument("--no-mixed-selection", dest="mixed_selection",
                         action="store_false", default=True)
-    parser.add_argument("--no_look_forward_twice", dest="look_forward_twice",
+    parser.add_argument("--no-look-forward-twice", dest="look_forward_twice",
                         action="store_false", default=True)
 
     # Training
     parser.add_argument('--lr-head', default=1e-4, type=float)
-    parser.add_argument('--lr_backbone', default=0., type=float)
+    parser.add_argument('--lr-backbone', default=0., type=float)
     parser.add_argument('--lr-drop', default=20, type=int)
     parser.add_argument('--lr-drop-factor', default=.2, type=float)
     parser.add_argument('--epochs', default=30, type=int)
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--weight-decay', default=1e-4, type=float)
     parser.add_argument('--clip-max-norm', default=.1, type=float)
-    parser.add_argument("--use_checkpoint", default=False, action="store_true")
+    parser.add_argument("--use-checkpoint", default=False, action="store_true")
 
     # Evaluation
     parser.add_argument("--topk", default=100, type=int)
@@ -121,12 +121,12 @@ def advanced_detector_args():
     parser.add_argument('--set-cost-class', default=2, type=float)
     parser.add_argument('--set-cost-bbox', default=5, type=float)
     parser.add_argument('--set-cost-giou', default=2, type=float)
-    parser.add_argument("--mask_loss_coef", default=1, type=float)
-    parser.add_argument("--dice_loss_coef", default=1, type=float)
-    parser.add_argument("--cls_loss_coef", default=2, type=float)
+    parser.add_argument("--mask-loss-coef", default=1, type=float)
+    parser.add_argument("--dice-loss-coef", default=1, type=float)
+    parser.add_argument("--cls-loss-coef", default=2, type=float)
     parser.add_argument('--bbox-loss-coef', default=5, type=float)
     parser.add_argument('--giou-loss-coef', default=2, type=float)
-    parser.add_argument("--focal_alpha", default=0.25, type=float)
+    parser.add_argument("--focal-alpha", default=0.25, type=float)
 
     # Misc.
     parser.add_argument('--device', default='cuda',

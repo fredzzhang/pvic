@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch import nn, Tensor
 from collections import OrderedDict
 from typing import Optional, Tuple, List
-from torchvision.ops import FeaturePyramidNetwork
+from torchvision.ops import FeaturePyramidNetwork, roi_align
 
 from transformers import (
     TransformerEncoder,
@@ -58,6 +58,41 @@ class MultiModalFusion(nn.Module):
         z = F.relu(torch.cat([x, y], dim=-1))
         z = self.mlp(z)
         return z
+    
+class AttentionPool2d(nn.Module):
+    def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
+        super().__init__()
+        self.positional_embedding = nn.Parameter(torch.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
+        self.num_heads = num_heads
+
+    def forward(self, x):
+        x = x.flatten(start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
+        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
+        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
+        x, _ = F.multi_head_attention_forward(
+            query=x[:1], key=x, value=x,
+            embed_dim_to_check=x.shape[-1],
+            num_heads=self.num_heads,
+            q_proj_weight=self.q_proj.weight,
+            k_proj_weight=self.k_proj.weight,
+            v_proj_weight=self.v_proj.weight,
+            in_proj_weight=None,
+            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
+            bias_k=None,
+            bias_v=None,
+            add_zero_attn=False,
+            dropout_p=0,
+            out_proj_weight=self.c_proj.weight,
+            out_proj_bias=self.c_proj.bias,
+            use_separate_proj_weight=True,
+            training=self.training,
+            need_weights=False
+        )
+        return x.squeeze(0)
 
 class HumanObjectMatcher(nn.Module):
     def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
@@ -203,6 +238,7 @@ class ViC(nn.Module):
         detector: Tuple[nn.Module, str], postprocessor: nn.Module,
         feature_head: nn.Module, ho_matcher: nn.Module,
         triplet_decoder: nn.Module, num_verbs: int,
+        recycle_object_hs: bool = True,
         repr_size: int = 384, human_idx: int = 0,
         # Focal loss hyper-parameters
         alpha: float = 0.5, gamma: float = .1,
@@ -222,6 +258,13 @@ class ViC(nn.Module):
         self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
+
+        self.recycle_hs = recycle_object_hs
+        if recycle_object_hs:
+            self.attn_pool = None
+        else:
+            hs_dim = detector[0].transformer.d_model
+            self.attn_pool = AttentionPool2d(7, hs_dim, hs_dim // 32, hs_dim)
 
         self.repr_size = repr_size
         self.human_idx = human_idx
@@ -291,12 +334,12 @@ class ViC(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        hs = ctx.transformer(ctx.input_proj(src), mask, ctx.query_embed.weight, pos[-1])[0]
+        hs, enc_feat = ctx.transformer(ctx.input_proj(src), mask, ctx.query_embed.weight, pos[-1])
 
         outputs_class = ctx.class_embed(hs)
         outputs_coord = ctx.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-        return out, hs, features
+        return out, hs, features, enc_feat
 
     def forward(self,
         images: List[Tensor],
@@ -335,8 +378,18 @@ class ViC(nn.Module):
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
         with torch.no_grad():
-            results, hs, features = self.od_forward(self.detector, images)
+            results, hs, features, enc_feat = self.od_forward(self.detector, images)
             results = self.postprocessor(results, image_sizes)
+
+        # Override object features if not recycling the hidden states from object detector.
+        if not self.recycle_hs:
+            rois = [r['boxes'] for r in results]
+            pooled = roi_align(enc_feat, rois, output_size=7, spatial_scale=1/32)
+            feat_dim = pooled.shape[1]
+            hs = self.attn_pool(pooled)
+            hs = hs.reshape(len(rois), 100, feat_dim)
+            # Create the encoder depth dimension for consistency.
+            hs = hs.unsqueeze(0)
 
         region_props = prepare_region_proposals(
             results, hs[-1], image_sizes,
@@ -347,9 +400,11 @@ class ViC(nn.Module):
         )
         boxes = [r['boxes'] for r in region_props]
         # Produce human-object pairs.
-        ho_queries, paired_inds, prior_scores, object_types, positional_embeds = self.ho_matcher(
-            region_props, image_sizes
-        )
+        (
+            ho_queries,
+            paired_inds, prior_scores,
+            object_types, positional_embeds
+        ) = self.ho_matcher(region_props, image_sizes)
         # Compute keys/values for triplet decoder.
         memory, mask = self.feature_head(features)
         b, h, w, c = memory.shape
@@ -420,6 +475,7 @@ def build_detector(args, obj_to_verb):
         ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,
         num_verbs=args.num_verbs,
+        recycle_object_hs=args.recycle_hs,
         repr_size=args.repr_dim,
         alpha=args.alpha, gamma=args.gamma,
         box_score_thresh=args.box_score_thresh,

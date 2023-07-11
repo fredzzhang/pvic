@@ -140,6 +140,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--detector', default='detr', type=str)
     parser.add_argument('--backbone-fusion-layer', default=-1, type=int)
+    parser.add_argument('--no-recycle', dest='recycle_hs', action='store_false', default=True)
+    parser.add_argument('--external-box', default=None, type=str)
     parser.add_argument('--repr-dim', default=384, type=int)
     parser.add_argument('--triplet-enc-layers', default=1, type=int)
     parser.add_argument('--triplet-dec-layers', default=2, type=int)

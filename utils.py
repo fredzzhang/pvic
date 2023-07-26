@@ -9,6 +9,7 @@ Microsoft Research Asia
 
 import os
 import time
+import json
 import torch
 import pickle
 import numpy as np
@@ -42,7 +43,7 @@ def custom_collate(batch):
     return images, targets
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root):
+    def __init__(self, name, partition, data_root, ext_box_dir):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -95,6 +96,7 @@ class DataFactory(Dataset):
             ])
 
         self.name = name
+        self.ext_box_dir = ext_box_dir
 
     def __len__(self):
         return len(self.dataset)
@@ -112,6 +114,16 @@ class DataFactory(Dataset):
             target['object'] = target.pop('objects')
 
         image, target = self.transforms(image, target)
+
+        if self.ext_box_dir is not None:
+            filename = self.dataset.filename(i).split('.')
+            if len(filename) != 2:
+                raise ValueError(f"The image file names are not in the format name.ext")
+            filename = '.'.join([filename[0], '.json'])
+            with open(os.path.join(self.ext_box_dir, filename), 'r') as f:
+                ext_det = json.load(f)
+            ext_det = pocket.ops.to_tensor(ext_det, input_format='dict')
+            return (image, ext_det), target
 
         return image, target
 

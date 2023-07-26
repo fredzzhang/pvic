@@ -48,7 +48,8 @@ def main(rank, args):
     )
     testset = DataFactory(
         name=args.dataset, partition=args.partitions[1],
-        data_root=args.data_root
+        data_root=args.data_root,
+        ext_box_dir=args.ext_box_dir
     )
 
     train_loader = DataLoader(

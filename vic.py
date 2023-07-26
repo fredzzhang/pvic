@@ -238,7 +238,6 @@ class ViC(nn.Module):
         detector: Tuple[nn.Module, str], postprocessor: nn.Module,
         feature_head: nn.Module, ho_matcher: nn.Module,
         triplet_decoder: nn.Module, num_verbs: int,
-        recycle_object_hs: bool = True,
         repr_size: int = 384, human_idx: int = 0,
         # Focal loss hyper-parameters
         alpha: float = 0.5, gamma: float = .1,
@@ -246,6 +245,9 @@ class ViC(nn.Module):
         box_score_thresh: float = .05,
         min_instances: int = 3,
         max_instances: int = 15,
+        # Options for external boxes
+        recycle_object_hs: bool = True,
+        ext_box: bool = False,
     ) -> None:
         super().__init__()
 
@@ -259,7 +261,6 @@ class ViC(nn.Module):
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
-        self.recycle_hs = recycle_object_hs
         if recycle_object_hs:
             self.attn_pool = None
         else:
@@ -274,6 +275,11 @@ class ViC(nn.Module):
         self.box_score_thresh = box_score_thresh
         self.min_instances = min_instances
         self.max_instances = max_instances
+
+        if ext_box and recycle_object_hs:
+            raise ValueError("When using external detections, object features cannot be reused.")
+        self.recycle_hs = recycle_object_hs
+        self.ext_box = ext_box
 
     def freeze_detector(self):
         for p in self.detector.parameters():
@@ -375,11 +381,30 @@ class ViC(nn.Module):
         """
         if self.training and targets is None:
             raise ValueError("In training mode, targets should be passed")
+
+        # Unpack images and external detections.
+        if self.ext_box:
+            images, detections = zip(*images)
+
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
         with torch.no_grad():
             results, hs, features, enc_feat = self.od_forward(self.detector, images)
             results = self.postprocessor(results, image_sizes)
+
+        # Override object detections if external boxes are provided.
+        if self.ext_box:
+            ext_dets = []
+            for dets, (i_h, i_w) in zip(detections, image_sizes):
+                bx = dets["boxes"]
+                sc = dets["scores"]
+                lb = dets["labels"]
+                o_h, o_w = dets["size"]
+                scale = torch.as_tensor([i_w / o_w, i_h / o_h, i_w / o_w, i_h / o_h]).view(1, 4)
+                bx *= scale
+                # Arrange the keys in the specific order.
+                ext_dets.append(dict(scores=sc, labels=lb, boxes=bx))
+            results = ext_dets
 
         # Override object features if not recycling the hidden states from object detector.
         if not self.recycle_hs:
@@ -475,11 +500,12 @@ def build_detector(args, obj_to_verb):
         ho_matcher=ho_matcher,
         triplet_decoder=triplet_decoder,
         num_verbs=args.num_verbs,
-        recycle_object_hs=args.recycle_hs,
         repr_size=args.repr_dim,
         alpha=args.alpha, gamma=args.gamma,
         box_score_thresh=args.box_score_thresh,
         min_instances=args.min_instances,
         max_instances=args.max_instances,
+        recycle_object_hs=args.recycle_hs,
+        ext_box=args.ext_box_dir is not None
     )
     return detector

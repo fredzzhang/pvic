@@ -385,6 +385,8 @@ class ViC(nn.Module):
         # Unpack images and external detections.
         if self.ext_box:
             images, detections = zip(*images)
+            images = list(images)
+            detections = list(detections)
 
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
@@ -400,7 +402,9 @@ class ViC(nn.Module):
                 sc = dets["scores"]
                 lb = dets["labels"]
                 o_h, o_w = dets["size"]
-                scale = torch.as_tensor([i_w / o_w, i_h / o_h, i_w / o_w, i_h / o_h]).view(1, 4)
+                scale = torch.as_tensor([
+                    i_w / o_w, i_h / o_h, i_w / o_w, i_h / o_h
+                ], device=images[0].device).view(1, 4)
                 bx *= scale
                 # Arrange the keys in the specific order.
                 ext_dets.append(dict(scores=sc, labels=lb, boxes=bx))
@@ -409,12 +413,15 @@ class ViC(nn.Module):
         # Override object features if not recycling the hidden states from object detector.
         if not self.recycle_hs:
             rois = [r['boxes'] for r in results]
+            n = [len(roi) for roi in rois]
             pooled = roi_align(enc_feat, rois, output_size=7, spatial_scale=1/32)
-            feat_dim = pooled.shape[1]
+            # feat_dim = pooled.shape[1]
             hs = self.attn_pool(pooled)
-            hs = hs.reshape(len(rois), 100, feat_dim)
-            # Create the encoder depth dimension for consistency.
-            hs = hs.unsqueeze(0)
+            # hs = hs.reshape(len(rois), 100, feat_dim)
+            hs = hs.split(n)
+            # hs = hs.unsqueeze(0)
+            # Create a list for indexing consistency.
+            hs = [hs,]
 
         region_props = prepare_region_proposals(
             results, hs[-1], image_sizes,

@@ -43,7 +43,7 @@ def custom_collate(batch):
     return images, targets
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root, ext_box_dir):
+    def __init__(self, name, partition, data_root, ext_box_dir=None):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -119,7 +119,7 @@ class DataFactory(Dataset):
             filename = self.dataset.filename(i).split('.')
             if len(filename) != 2:
                 raise ValueError(f"The image file names are not in the format name.ext")
-            filename = '.'.join([filename[0], '.json'])
+            filename = '.'.join([filename[0], 'json'])
             with open(os.path.join(self.ext_box_dir, filename), 'r') as f:
                 ext_det = json.load(f)
             ext_det = pocket.ops.to_tensor(ext_det, input_format='dict')

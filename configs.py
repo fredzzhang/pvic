@@ -70,6 +70,7 @@ def advanced_detector_args():
                         help="position / size * scale")
     parser.add_argument('--num-feature-levels', default=4, type=int, help='number of feature levels')
     parser.add_argument("--drop-path-rate", default=0.2, type=float)
+    parser.add_argument("--pretrained_backbone_path", default=None, type=str)
 
     # Transformer
     parser.add_argument('--hidden-dim', default=256, type=int)

@@ -171,7 +171,7 @@ class Permute(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         return x.permute(self.dims)
 
-class BaseFeatureHead(nn.Module):
+class FeatureHead(nn.Module):
     def __init__(self, dim, dim_backbone, return_layer, num_layers):
         super().__init__()
         self.dim = dim
@@ -196,31 +196,6 @@ class BaseFeatureHead(nn.Module):
         x = self.fpn(pyramid)[f"{self.return_layer}"]
         x = self.layers(x)
         return x, mask
-
-class AdvFeatureHead(nn.Module):
-    def __init__(self, dim, num_layers):
-        super().__init__()
-        self.dim = dim
-
-        self.c3 = nn.Conv2d(dim, dim, 3, 2, 1)
-        self.c4 = nn.Conv2d(dim, dim, 3, 2, 1)
-        self.out = nn.Conv2d(dim, dim, 3, 1, 1)
-
-        self.layers = nn.Sequential(
-            Permute([0, 2, 3, 1]),
-            SwinTransformer(dim, num_layers)
-        )
-    def forward(self, x):
-        c3, c4, c5, c6 = x
-        x = self.c3(c3.tensors) + c4.tensors
-        x = self.c4(x) + c5.tensors
-
-        feat_shape = x.shape[-2:]
-        x_ = F.interpolate(c6.tensors, size=feat_shape, mode="nearest")
-        x = x + x_
-        x = self.out(x)
-        x = self.layers(x)
-        return x, c5.mask
 
 def inverse_sigmoid(x, eps=1e-5):
     x = x.clamp(min=0, max=1)
@@ -421,9 +396,7 @@ class ViC(nn.Module):
                 "pred_logits": enc_outputs_class,
                 "pred_boxes": enc_outputs_coord,
             }
-
-        nested_tensors = [NestedTensor(a, b) for a, b in zip(srcs, masks)]
-        return out, hs, nested_tensors
+        return out, hs, features
 
     def forward(self,
         images: List[Tensor],
@@ -516,17 +489,8 @@ class ViC(nn.Module):
 def build_detector(args, obj_to_verb):
     if args.detector == "base":
         detr, _, postprocessors = build_base_detr(args)
-        return_layer = {"C5": -1, "C4": -2, "C3": -3}[args.kv_src]
-        num_channels = detr.backbone.num_channels
-        feature_head = BaseFeatureHead(
-            args.hidden_dim, num_channels,
-            return_layer, args.triplet_enc_layers
-        )
     elif args.detector == "advanced":
         detr, _, postprocessors = build_advanced_detr(args)
-        feature_head = AdvFeatureHead(
-            args.hidden_dim, args.triplet_enc_layers
-        )
 
     if os.path.exists(args.pretrained):
         if dist.is_initialized():
@@ -549,6 +513,15 @@ def build_detector(args, obj_to_verb):
     triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
+    )
+    return_layer = {"C5": -1, "C4": -2, "C3": -3}[args.kv_src]
+    if isinstance(detr.backbone.num_channels, list):
+        num_channels = detr.backbone.num_channels[-1]
+    else:
+        num_channels = detr.backbone.num_channels
+    feature_head = FeatureHead(
+        args.hidden_dim, num_channels,
+        return_layer, args.triplet_enc_layers
     )
     model = ViC(
         (detr, args.detector), postprocessors['bbox'],

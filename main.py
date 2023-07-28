@@ -20,8 +20,8 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 
 from vic import build_detector
-from configs import base_detector_args
 from utils import custom_collate, CustomisedDLE, DataFactory
+from configs import base_detector_args, advanced_detector_args
 
 warnings.filterwarnings("ignore")
 
@@ -135,11 +135,17 @@ def sanity_check(args):
     outputs = model([image], targets=[target])
 
 if __name__ == '__main__':
-    
-    parser = argparse.ArgumentParser(parents=[base_detector_args(),])
 
-    parser.add_argument('--detector', default='detr', type=str)
-    parser.add_argument('--backbone-fusion-layer', default=-1, type=int)
+    if "DETR" not in os.environ:
+        raise KeyError(f"Specify the detector type with env. variable \"DETR\".")
+    elif os.environ["DETR"] == "base":
+        parser = argparse.ArgumentParser(parents=[base_detector_args(),])
+        parser.add_argument('--detector', default='base', type=str)
+    elif os.environ["DETR"] == "advanced":
+        parser = argparse.ArgumentParser(parents=[advanced_detector_args(),])
+        parser.add_argument('--detector', default='advanced', type=str)
+
+    parser.add_argument('--kv-src', default='C5', type=str, choices=['C5', 'C4', 'C3'])
     parser.add_argument('--repr-dim', default=384, type=int)
     parser.add_argument('--triplet-enc-layers', default=1, type=int)
     parser.add_argument('--triplet-dec-layers', default=2, type=int)

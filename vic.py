@@ -33,7 +33,8 @@ from ops import (
     compute_sinusoidal_pe
 )
 
-from detr.models import build_model
+from detr.models import build_model as build_base_detr
+from h_detr.models import build_model as build_advanced_detr
 from detr.models.position_encoding import PositionEmbeddingSine
 from detr.util.misc import NestedTensor, nested_tensor_from_tensor_list
 
@@ -196,6 +197,12 @@ class FeatureHead(nn.Module):
         x = self.layers(x)
         return x, mask
 
+def inverse_sigmoid(x, eps=1e-5):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)
+
 class ViC(nn.Module):
     """Two-stage HOI detector with enhanced visual context"""
 
@@ -214,7 +221,10 @@ class ViC(nn.Module):
         super().__init__()
 
         self.detector = detector[0]
-        self.od_forward = {"detr": self.detr_forward}[detector[1]]
+        self.od_forward = {
+            "base": self.base_forward,
+            "advanced": self.advanced_forward,
+        }[detector[1]]
         self.postprocessor = postprocessor
 
         self.ho_matcher = ho_matcher
@@ -284,7 +294,7 @@ class ViC(nn.Module):
         return detections
 
     @staticmethod
-    def detr_forward(ctx, samples: NestedTensor):
+    def base_forward(ctx, samples: NestedTensor):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, pos = ctx.backbone(samples)
@@ -296,6 +306,96 @@ class ViC(nn.Module):
         outputs_class = ctx.class_embed(hs)
         outputs_coord = ctx.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        return out, hs, features
+
+    @staticmethod
+    def advanced_forward(ctx, samples: NestedTensor):
+        if not isinstance(samples, NestedTensor):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = ctx.backbone(samples)
+
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            src, mask = feat.decompose()
+            srcs.append(ctx.input_proj[l](src))
+            masks.append(mask)
+            assert mask is not None
+        if ctx.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, ctx.num_feature_levels):
+                if l == _len_srcs:
+                    src = ctx.input_proj[l](features[-1].tensors)
+                else:
+                    src = ctx.input_proj[l](srcs[-1])
+                m = samples.mask
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(
+                    torch.bool
+                )[0]
+                pos_l = ctx.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)
+                pos.append(pos_l)
+
+        query_embeds = None
+        if not ctx.two_stage or ctx.mixed_selection:
+            query_embeds = ctx.query_embed.weight[0 : ctx.num_queries, :]
+
+        self_attn_mask = (
+            torch.zeros([ctx.num_queries, ctx.num_queries,]).bool().to(src.device)
+        )
+        self_attn_mask[ctx.num_queries_one2one :, 0 : ctx.num_queries_one2one,] = True
+        self_attn_mask[0 : ctx.num_queries_one2one, ctx.num_queries_one2one :,] = True
+
+        (
+            hs,
+            init_reference,
+            inter_references,
+            enc_outputs_class,
+            enc_outputs_coord_unact,
+        ) = ctx.transformer(srcs, masks, pos, query_embeds, self_attn_mask)
+
+        outputs_classes_one2one = []
+        outputs_coords_one2one = []
+        outputs_classes_one2many = []
+        outputs_coords_one2many = []
+        for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+            outputs_class = ctx.class_embed[lvl](hs[lvl])
+            tmp = ctx.bbox_embed[lvl](hs[lvl])
+            if reference.shape[-1] == 4:
+                tmp += reference
+            else:
+                assert reference.shape[-1] == 2
+                tmp[..., :2] += reference
+            outputs_coord = tmp.sigmoid()
+
+            outputs_classes_one2one.append(outputs_class[:, 0 : ctx.num_queries_one2one])
+            outputs_classes_one2many.append(outputs_class[:, ctx.num_queries_one2one :])
+            outputs_coords_one2one.append(outputs_coord[:, 0 : ctx.num_queries_one2one])
+            outputs_coords_one2many.append(outputs_coord[:, ctx.num_queries_one2one :])
+        outputs_classes_one2one = torch.stack(outputs_classes_one2one)
+        outputs_coords_one2one = torch.stack(outputs_coords_one2one)
+        outputs_classes_one2many = torch.stack(outputs_classes_one2many)
+        outputs_coords_one2many = torch.stack(outputs_coords_one2many)
+
+        out = {
+            "pred_logits": outputs_classes_one2one[-1],
+            "pred_boxes": outputs_coords_one2one[-1],
+            "pred_logits_one2many": outputs_classes_one2many[-1],
+            "pred_boxes_one2many": outputs_coords_one2many[-1],
+        }
+
+        if ctx.two_stage:
+            enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
+            out["enc_outputs"] = {
+                "pred_logits": enc_outputs_class,
+                "pred_boxes": enc_outputs_coord,
+            }
         return out, hs, features
 
     def forward(self,
@@ -347,9 +447,11 @@ class ViC(nn.Module):
         )
         boxes = [r['boxes'] for r in region_props]
         # Produce human-object pairs.
-        ho_queries, paired_inds, prior_scores, object_types, positional_embeds = self.ho_matcher(
-            region_props, image_sizes
-        )
+        (
+            ho_queries,
+            paired_inds, prior_scores,
+            object_types, positional_embeds
+        ) = self.ho_matcher(region_props, image_sizes)
         # Compute keys/values for triplet decoder.
         memory, mask = self.feature_head(features)
         b, h, w, c = memory.shape
@@ -385,7 +487,11 @@ class ViC(nn.Module):
         return detections
 
 def build_detector(args, obj_to_verb):
-    detr, _, postprocessors = build_model(args)
+    if args.detector == "base":
+        detr, _, postprocessors = build_base_detr(args)
+    elif args.detector == "advanced":
+        detr, _, postprocessors = build_advanced_detr(args)
+
     if os.path.exists(args.pretrained):
         if dist.is_initialized():
             print(f"Rank {dist.get_rank()}: Load weights for the object detector from {args.pretrained}")
@@ -408,13 +514,16 @@ def build_detector(args, obj_to_verb):
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
     )
+    return_layer = {"C5": -1, "C4": -2, "C3": -3}[args.kv_src]
+    if isinstance(detr.backbone.num_channels, list):
+        num_channels = detr.backbone.num_channels[-1]
+    else:
+        num_channels = detr.backbone.num_channels
     feature_head = FeatureHead(
-        args.hidden_dim,
-        detr.backbone.num_channels,
-        args.backbone_fusion_layer,
-        args.triplet_enc_layers
+        args.hidden_dim, num_channels,
+        return_layer, args.triplet_enc_layers
     )
-    detector = ViC(
+    model = ViC(
         (detr, args.detector), postprocessors['bbox'],
         feature_head=feature_head,
         ho_matcher=ho_matcher,
@@ -426,4 +535,4 @@ def build_detector(args, obj_to_verb):
         min_instances=args.min_instances,
         max_instances=args.max_instances,
     )
-    return detector
+    return model

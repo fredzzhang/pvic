@@ -78,11 +78,11 @@ def main(rank, args):
     model = build_detector(args, object_to_target)
 
     if os.path.exists(args.resume):
-        print(f"=> Rank {rank}: continue from saved checkpoint {args.resume}")
+        print(f"=> Rank {rank}: PViC loaded from saved checkpoint {args.resume}.")
         checkpoint = torch.load(args.resume, map_location='cpu')
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
-        print(f"=> Rank {rank}: start from a randomly initialised model")
+        print(f"=> Rank {rank}: PViC randomly initialised.")
 
     engine = CustomisedDLE(model, train_loader, test_loader, args)
 

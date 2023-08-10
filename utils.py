@@ -143,32 +143,45 @@ class CustomisedDLE(DistributedLearningEngine):
         self.test_dataloader = test_dataloader
 
     def _on_start(self):
-        ap = self.test_hico()
-        if self._rank == 0:
-            # Fetch indices for rare and non-rare classes
-            rare = self.test_dataloader.dataset.dataset.rare
-            non_rare = self.test_dataloader.dataset.dataset.non_rare
-            perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
-            print(
-                f"Epoch {self._state.epoch} =>\t"
-                f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
-            )
-            self.best_perf = perf[0]
-            wandb.init(config=self.config)
-            wandb.watch(self._state.net.module)
-            wandb.define_metric("epochs")
-            wandb.define_metric("mAP full", step_metric="epochs", summary="max")
-            wandb.define_metric("mAP rare", step_metric="epochs", summary="max")
-            wandb.define_metric("mAP non_rare", step_metric="epochs", summary="max")
+        if self._train_loader.dataset.name == "hicodet":
+            ap = self.test_hico()
+            if self._rank == 0:
+                # Fetch indices for rare and non-rare classes
+                rare = self.test_dataloader.dataset.dataset.rare
+                non_rare = self.test_dataloader.dataset.dataset.non_rare
+                perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
+                print(
+                    f"Epoch {self._state.epoch} =>\t"
+                    f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
+                )
+                self.best_perf = perf[0]
+                wandb.init(config=self.config)
+                wandb.watch(self._state.net.module)
+                wandb.define_metric("epochs")
+                wandb.define_metric("mAP full", step_metric="epochs", summary="max")
+                wandb.define_metric("mAP rare", step_metric="epochs", summary="max")
+                wandb.define_metric("mAP non_rare", step_metric="epochs", summary="max")
 
-            wandb.define_metric("training_steps")
-            wandb.define_metric("elapsed_time", step_metric="training_steps", summary="max")
-            wandb.define_metric("loss", step_metric="training_steps", summary="min")
+                wandb.define_metric("training_steps")
+                wandb.define_metric("elapsed_time", step_metric="training_steps", summary="max")
+                wandb.define_metric("loss", step_metric="training_steps", summary="min")
 
-            wandb.log({
-                "epochs": self._state.epoch, "mAP full": perf[0],
-                "mAP rare": perf[1], "mAP non_rare": perf[2]
-            })
+                wandb.log({
+                    "epochs": self._state.epoch, "mAP full": perf[0],
+                    "mAP rare": perf[1], "mAP non_rare": perf[2]
+                })
+        else:
+            ap = self.test_vcoco()
+            if self._rank == 0:
+                perf = [ap.mean().item(),]
+                print(
+                    f"Epoch {self._state.epoch} =>\t"
+                    f"mAP: {perf[0]:.4f}."
+                )
+                self.best_perf = perf[0]
+                """
+                NOTE wandb was not setup for V-COCO as the dataset was only used for evaluation
+                """
 
     def _on_end(self):
         if self._rank == 0:
@@ -214,20 +227,34 @@ class CustomisedDLE(DistributedLearningEngine):
         self._state.running_loss.reset()
 
     def _on_end_epoch(self):
-        ap = self.test_hico()
+        if self._train_loader.dataset.name == "hicodet":
+            ap = self.test_hico()
+            if self._rank == 0:
+                # Fetch indices for rare and non-rare classes
+                rare = self.test_dataloader.dataset.dataset.rare
+                non_rare = self.test_dataloader.dataset.dataset.non_rare
+                perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
+                print(
+                    f"Epoch {self._state.epoch} =>\t"
+                    f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
+                )
+                wandb.log({
+                    "epochs": self._state.epoch, "mAP full": perf[0],
+                    "mAP rare": perf[1], "mAP non_rare": perf[2]
+                })
+        else:
+            ap = self.test_vcoco()
+            if self._rank == 0:
+                perf = [ap.mean().item(),]
+                print(
+                    f"Epoch {self._state.epoch} =>\t"
+                    f"mAP: {perf[0]:.4f}."
+                )
+                """
+                NOTE wandb was not setup for V-COCO as the dataset was only used for evaluation
+                """
+
         if self._rank == 0:
-            # Fetch indices for rare and non-rare classes
-            rare = self.test_dataloader.dataset.dataset.rare
-            non_rare = self.test_dataloader.dataset.dataset.non_rare
-            perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
-            print(
-                f"Epoch {self._state.epoch} =>\t"
-                f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
-            )
-            wandb.log({
-                "epochs": self._state.epoch, "mAP full": perf[0],
-                "mAP rare": perf[1], "mAP non_rare": perf[2]
-            })
             # Save checkpoints
             checkpoint = {
                 'iteration': self._state.iteration,
@@ -399,6 +426,71 @@ class CustomisedDLE(DistributedLearningEngine):
             )
 
     @torch.no_grad()
+    def test_vcoco(self):
+        dataloader = self.test_dataloader
+        net = self._state.net; net.eval()
+
+        dataset = dataloader.dataset.dataset
+        associate = BoxPairAssociation(min_iou=0.5)
+
+        if self._rank == 0:
+            meter = DetectionAPMeter(
+                24, nproc=1, algorithm='11P',
+                num_gt=dataset.num_instances,
+            )
+        for batch in tqdm(dataloader, disable=(self._world_size != 1)):
+            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
+            outputs = net(*inputs)
+            outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
+            targets = batch[-1]
+
+            scores_clt = []; preds_clt = []; labels_clt = []
+            for output, target in zip(outputs, targets):
+                # Format detections
+                boxes = output['boxes']
+                boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
+                scores = output['scores']
+                actions = output['labels']
+                gt_bx_h = recover_boxes(target['boxes_h'], target['size'])
+                gt_bx_o = recover_boxes(target['boxes_o'], target['size'])
+
+                # Associate detected pairs with ground truth pairs
+                labels = torch.zeros_like(scores)
+                unique_actions = actions.unique()
+                for act_idx in unique_actions:
+                    gt_idx = torch.nonzero(target['actions'] == act_idx).squeeze(1)
+                    det_idx = torch.nonzero(actions == act_idx).squeeze(1)
+                    if len(gt_idx):
+                        labels[det_idx] = associate(
+                            (gt_bx_h[gt_idx].view(-1, 4),
+                            gt_bx_o[gt_idx].view(-1, 4)),
+                            (boxes_h[det_idx].view(-1, 4),
+                            boxes_o[det_idx].view(-1, 4)),
+                            scores[det_idx].view(-1)
+                        )
+
+                scores_clt.append(scores)
+                preds_clt.append(actions)
+                labels_clt.append(labels)
+            # Collate results into one tensor
+            scores_clt = torch.cat(scores_clt)
+            preds_clt = torch.cat(preds_clt)
+            labels_clt = torch.cat(labels_clt)
+            # Gather data from all processes
+            scores_ddp = pocket.utils.all_gather(scores_clt)
+            preds_ddp = pocket.utils.all_gather(preds_clt)
+            labels_ddp = pocket.utils.all_gather(labels_clt)
+
+            if self._rank == 0:
+                meter.append(torch.cat(scores_ddp), torch.cat(preds_ddp), torch.cat(labels_ddp))
+
+        if self._rank == 0:
+            ap = meter.eval()
+            return ap
+        else:
+            return -1
+
+    @torch.no_grad()
     def cache_vcoco(self, dataloader, cache_dir='vcoco_cache'):
         net = self._state.net
         net.eval()
@@ -420,7 +512,7 @@ class CustomisedDLE(DistributedLearningEngine):
             image_id = dataset.image_id(i)
             # Format detections
             boxes = output['boxes']
-            boxes_h, boxes_o = boxes[output['pairing']].unbind(0)
+            boxes_h, boxes_o = boxes[output['pairing']].unbind(1)
             scores = output['scores']
             actions = output['labels']
             # Rescale the boxes to original image size

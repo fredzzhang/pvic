@@ -78,11 +78,11 @@ def main(rank, args):
     model = build_detector(args, object_to_target)
 
     if os.path.exists(args.resume):
-        print(f"=> Rank {rank}: continue from saved checkpoint {args.resume}")
+        print(f"=> Rank {rank}: PViC loaded from saved checkpoint {args.resume}.")
         checkpoint = torch.load(args.resume, map_location='cpu')
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
-        print(f"=> Rank {rank}: start from a randomly initialised model")
+        print(f"=> Rank {rank}: PViC randomly initialised.")
 
     engine = CustomisedDLE(model, train_loader, test_loader, args)
 
@@ -95,18 +95,27 @@ def main(rank, args):
 
     if args.eval:
         if args.dataset == 'vcoco':
-            raise NotImplementedError(f"Evaluation on V-COCO has not been implemented.")
-        ap = engine.test_hico()
-        if rank == 0:
-            # Fetch indices for rare and non-rare classes
-            rare = trainset.dataset.rare
-            non_rare = trainset.dataset.non_rare
-            print(
-                f"The mAP is {ap.mean():.4f},"
-                f" rare: {ap[rare].mean():.4f},"
-                f" none-rare: {ap[non_rare].mean():.4f}"
-            )
-        return
+            """
+            NOTE This evaluation results on V-COCO do not necessarily follow the 
+            protocol as the official evaluation code, and so are only used for
+            diagnostic purposes.
+            """
+            ap = engine.test_vcoco()
+            if rank == 0:
+                print(f"The mAP is {ap.mean():.4f}.")
+            return
+        else:
+            ap = engine.test_hico()
+            if rank == 0:
+                # Fetch indices for rare and non-rare classes
+                rare = trainset.dataset.rare
+                non_rare = trainset.dataset.non_rare
+                print(
+                    f"The mAP is {ap.mean():.4f},"
+                    f" rare: {ap[rare].mean():.4f},"
+                    f" none-rare: {ap[non_rare].mean():.4f}"
+                )
+            return
 
     model.freeze_detector()
     param_dicts = [{"params": [p for p in model.parameters() if p.requires_grad]}]

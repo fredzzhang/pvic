@@ -150,9 +150,11 @@ if __name__ == '__main__':
     elif os.environ["DETR"] == "base":
         parser = argparse.ArgumentParser(parents=[base_detector_args(),])
         parser.add_argument('--detector', default='base', type=str)
+        parser.add_argument('--raw-lambda', default=2.8, type=float)
     elif os.environ["DETR"] == "advanced":
         parser = argparse.ArgumentParser(parents=[advanced_detector_args(),])
         parser.add_argument('--detector', default='advanced', type=str)
+        parser.add_argument('--raw-lambda', default=1.7, type=float)
 
     parser.add_argument('--kv-src', default='C5', type=str, choices=['C5', 'C4', 'C3'])
     parser.add_argument('--repr-dim', default=384, type=int)

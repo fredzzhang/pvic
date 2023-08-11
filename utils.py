@@ -182,6 +182,7 @@ class CustomisedDLE(DistributedLearningEngine):
                 """
                 NOTE wandb was not setup for V-COCO as the dataset was only used for evaluation
                 """
+                wandb.init(config=self.config)
 
     def _on_end(self):
         if self._rank == 0:
@@ -359,9 +360,9 @@ class CustomisedDLE(DistributedLearningEngine):
         nimages = len(dataset.annotations)
         all_results = np.empty((600, nimages), dtype=object)
 
-        for i, batch in enumerate(tqdm(dataloader)):
-            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
-            output = net(*inputs)
+        for i, (image, target) in enumerate(tqdm(dataloader.dataset)):
+            inputs = pocket.ops.relocate_to_cuda([image,])
+            output = net(inputs)
 
             # Skip images without detections
             if output is None or len(output) == 0:
@@ -497,8 +498,8 @@ class CustomisedDLE(DistributedLearningEngine):
 
         dataset = dataloader.dataset.dataset
         all_results = []
-        for i, batch in enumerate(tqdm(dataloader)):
-            inputs = pocket.ops.relocate_to_cuda(batch[0])
+        for i, (image, target) in enumerate(tqdm(dataloader.dataset)):
+            inputs = pocket.ops.relocate_to_cuda([image,])
             output = net(inputs)
 
             # Skip images without detections

@@ -160,10 +160,8 @@ def compute_prior_scores(
     prior_h = torch.zeros(len(x), num_classes, device=scores.device)
     prior_o = torch.zeros_like(prior_h)
 
-    # Raise the power of object detection scores during inference
-    p = 1.0 if is_training else 2.8
-    s_h = scores[x].pow(p)
-    s_o = scores[y].pow(p)
+    s_h = scores[x]
+    s_o = scores[y]
 
     # Map object class index to target class index
     # Object class index to target class index is a one-to-many mapping

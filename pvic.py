@@ -203,7 +203,7 @@ def inverse_sigmoid(x, eps=1e-5):
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
 
-class ViC(nn.Module):
+class PViC(nn.Module):
     """Two-stage HOI detector with enhanced visual context"""
 
     def __init__(self,
@@ -525,7 +525,7 @@ def build_detector(args, obj_to_verb):
         args.hidden_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
-    model = ViC(
+    model = PViC(
         (detr, args.detector), postprocessors['bbox'],
         feature_head=feature_head,
         ho_matcher=ho_matcher,

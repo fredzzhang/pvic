@@ -19,7 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 
-from vic import build_detector
+from pvic import build_detector
 from utils import custom_collate, CustomisedDLE, DataFactory
 from configs import base_detector_args, advanced_detector_args
 

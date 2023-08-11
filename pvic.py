@@ -203,7 +203,7 @@ def inverse_sigmoid(x, eps=1e-5):
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
 
-class ViC(nn.Module):
+class PViC(nn.Module):
     """Two-stage HOI detector with enhanced visual context"""
 
     def __init__(self,
@@ -217,6 +217,7 @@ class ViC(nn.Module):
         box_score_thresh: float = .05,
         min_instances: int = 3,
         max_instances: int = 15,
+        raw_lambda: float = 2.8,
     ) -> None:
         super().__init__()
 
@@ -241,6 +242,7 @@ class ViC(nn.Module):
         self.box_score_thresh = box_score_thresh
         self.min_instances = min_instances
         self.max_instances = max_instances
+        self.raw_lambda = raw_lambda
 
     def freeze_detector(self):
         for p in self.detector.parameters():
@@ -285,7 +287,7 @@ class ViC(nn.Module):
         ):
             pr = pr.prod(1)
             x, y = torch.nonzero(pr).unbind(1)
-            scores = lg[x, y].sigmoid() * pr[x, y]
+            scores = lg[x, y].sigmoid() * pr[x, y].pow(self.raw_lambda)
             detections.append(dict(
                 boxes=bx, pairing=p_inds[x], scores=scores,
                 labels=y, objects=objs[x], size=size, x=x
@@ -523,7 +525,7 @@ def build_detector(args, obj_to_verb):
         args.hidden_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
-    model = ViC(
+    model = PViC(
         (detr, args.detector), postprocessors['bbox'],
         feature_head=feature_head,
         ho_matcher=ho_matcher,
@@ -534,5 +536,6 @@ def build_detector(args, obj_to_verb):
         box_score_thresh=args.box_score_thresh,
         min_instances=args.min_instances,
         max_instances=args.max_instances,
+        raw_lambda=args.raw_lambda,
     )
     return model

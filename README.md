@@ -5,6 +5,8 @@ __The repository is currently being cleaned up.__
 This repository contains the official PyTorch implementation for the paper
 > Frederic Z. Zhang, Yuhui Yuan, Dylan Campbell, Zhuoyao Zhong, Stephen Gould; _Exploring Predicate Visual Context for Detecting Human-Object Interactions_; To appear in the IEEE/CVF International Conference on Computer Vision (ICCV), 2023.
 
+\[[__preprint__](https://arxiv.org/pdf/2308.06202.pdf)\]
+
 ## Setup
 
 Use the package management tool of your choice and run the following commands after creating your environment. 

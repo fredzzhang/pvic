@@ -65,7 +65,7 @@ DETR=base python inference.py --resume checkpoints/pvic-detr-r50-hicodet.pth --i
 
 The detected human-object pairs with scores overlayed are saved to `fig.png`, while the attention weights are saved to `pair_xx_attn_head_x.png`. Below are some sample outputs.
 
-<img src="./assets/fig.png" align="left" height="150">&nbsp;&nbsp;<img src="./assets/pair_33_attn_head_1.png" align="center" height="150">&nbsp;&nbsp;<img src="./assets/pair_33_attn_head_6.png" align="center" height="150">
+<img src="./assets/fig.png" align="center" height="150">&nbsp;&nbsp;<img src="./assets/pair_33_attn_head_1.png" align="center" height="150">&nbsp;&nbsp;<img src="./assets/pair_33_attn_head_6.png" align="center" height="150">
 
 In addition, the argument `--image-path` enables inference on custom images.
 

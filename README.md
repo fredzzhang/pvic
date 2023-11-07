@@ -71,7 +71,11 @@ In addition, the argument `--image-path` enables inference on custom images.
 
 ## Training and Testing
 
-Refer to the [documentations](docs.md) for model checkpoints and training/testing commands.
+Refer to the documentation for model checkpoints and training/testing commands.
+
+## License
+
+PViC is released under the [BSD-3-Clause License](./LICENSE).
 
 ## Citation
 

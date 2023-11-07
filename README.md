@@ -71,7 +71,7 @@ In addition, the argument `--image-path` enables inference on custom images.
 
 ## Training and Testing
 
-Refer to the documentation for model checkpoints and training/testing commands.
+Refer to the [documentation](docs.md) for model checkpoints and training/testing commands.
 
 ## License
 

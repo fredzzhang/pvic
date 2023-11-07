@@ -1,6 +1,5 @@
 # PViC: Predicate Visual Context
 
-
 This repository contains the official PyTorch implementation for the paper
 > Frederic Z. Zhang, Yuhui Yuan, Dylan Campbell, Zhuoyao Zhong, Stephen Gould; _Exploring Predicate Visual Context for Detecting Human-Object Interactions_; In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), 2023, pp. 10411-10421.
 
@@ -59,16 +58,17 @@ This repository contains the official PyTorch implementation for the paper
 ## Visualisation
 
 
+
 ## Training and Testing
 
-Refer to the instruction [here]().
+Refer to the [documentations](docs.md) for model checkpoints and training/testing commands.
 
 ## Citation
 
 If you find our work useful for your research, please consider citing us:
 
 ```bibtex
-@inproceedings{zhang2022pvic,
+@inproceedings{zhang2023pvic,
   author    = {Zhang, Frederic Z. and Yuan, Yuhui and Campbell, Dylan and Zhong, Zhuoyao and Gould, Stephen},
   title     = {Exploring Predicate Visual Context in Detecting Human–Object Interactions},
   booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},

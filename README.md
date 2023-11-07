@@ -56,11 +56,12 @@ This repository contains the official PyTorch implementation for the paper
         ln -s /path/to/coco ./mscoco2014
         ```
 
+## Visualisation
+
+
 ## Training and Testing
 
 Refer to the instruction [here]().
-
-## Visualisation
 
 ## Citation
 
@@ -68,7 +69,7 @@ If you find our work useful for your research, please consider citing us:
 
 ```bibtex
 @inproceedings{zhang2022pvic,
-  author    = {Zhang, Frederic Z. and Campbell, Dylan and Gould, Stephen},
+  author    = {Zhang, Frederic Z. and Yuan, Yuhui and Campbell, Dylan and Zhong, Zhuoyao and Gould, Stephen},
   title     = {Exploring Predicate Visual Context in Detecting Human–Object Interactions},
   booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
   month     = {October},

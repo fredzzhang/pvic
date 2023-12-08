@@ -63,7 +63,7 @@ DETR=advanced python main.py --num-queries-one2many 1500 \
 ### PViC-H-Defm-DETR-SwinL
 ```bash
 # Training
-DETR=advanced python main.py --backbone swin_large \
+DETR=advanced python main.py --backbone swin_large --use-checkpoint \
                              --drop-path-rate 0.5 \
                              --num-queries-one2one 900 \
                              --num-queries-one2many 1500 \
@@ -150,7 +150,7 @@ DETR=advanced python main.py --dataset vcoco --data-root vcoco/ --partitions tra
 ```bash
 # Training
 DETR=advanced python main.py --dataset vcoco --data-root vcoco/ --partitions trainval test \
-                             --backbone swin_large \
+                             --backbone swin_large --use-checkpoint \
                              --drop-path-rate 0.5 \
                              --num-queries-one2one 900 \
                              --num-queries-one2many 1500 \

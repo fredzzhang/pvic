@@ -29,7 +29,7 @@ This repository contains the official PyTorch implementation for the paper
     git submodule update
     pip install -e pocket
     # Build CUDA operator for MultiScaleDeformableAttention
-    cd h_detr/model/ops
+    cd h_detr/models/ops
     python setup.py build install
     ```
 2. Prepare the [HICO-DET dataset](https://drive.google.com/open?id=1QZcJmGVlF9f4h-XLWe9Gkmnmj2z1gSnk).
